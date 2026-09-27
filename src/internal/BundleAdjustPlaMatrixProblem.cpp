@@ -2,7 +2,7 @@
 
 #include "BundleAdjustValidation.h"
 
-#include <plamatrix/ops/vector.h>
+#include <plamatrix/dense/matrix.h>
 
 #include <algorithm>
 #include <cmath>
@@ -34,17 +34,42 @@ namespace plabundle::internal::plamatrix_ba
         problem.activeTrack.assign(tracks.size(), 0);
         problem.activeLaserRange.assign(options.laserRangeConstraints.size(), 0);
         problem.cameraBlock.assign(cameras.size(), -1);
+        problem.rigCaptureBlockByCamera.assign(cameras.size(), -1);
+        problem.rigSensorBlockByCamera.assign(cameras.size(), -1);
+        problem.rigCaptureIndexByCamera.assign(cameras.size(), -1);
+        problem.rigSensorIndexByCamera.assign(cameras.size(), -1);
         problem.intrinsicBlockByCamera.assign(cameras.size(), -1);
         problem.calibrationGroupByCamera.assign(cameras.size(), 0);
         problem.trackPrimaryBlock.assign(tracks.size(), -1);
         problem.trackBlock.assign(tracks.size(), -1);
         problem.laserBlock.assign(options.laserRangeConstraints.size(), -1);
         std::vector<char> camera_has_residual(cameras.size(), 0);
+        if (!options.rig.empty())
+        {
+            for (const RigCameraBinding& binding : options.rig.cameraBindings)
+            {
+                const auto capture =
+                    std::find_if(options.rig.captures.begin(),
+                                 options.rig.captures.end(),
+                                 [&](const RigCapture& value)
+                                 { return value.rigId == binding.rigId && value.captureId == binding.captureId; });
+                const auto sensor =
+                    std::find_if(options.rig.sensors.begin(),
+                                 options.rig.sensors.end(),
+                                 [&](const RigSensor& value)
+                                 { return value.rigId == binding.rigId && value.sensorId == binding.sensorId; });
+                const std::size_t camera_index = static_cast<std::size_t>(binding.cameraIndex);
+                problem.rigCaptureIndexByCamera[camera_index] =
+                    static_cast<int>(std::distance(options.rig.captures.begin(), capture));
+                problem.rigSensorIndexByCamera[camera_index] =
+                    static_cast<int>(std::distance(options.rig.sensors.begin(), sensor));
+            }
+        }
 
         for (std::size_t track_index = 0; track_index < tracks.size(); ++track_index)
         {
             const BATrack& track = tracks[track_index];
-            if (!plamatrix::isFinite(plamatrix::Vec3<double>(track.initialPoint)))
+            if (!plamatrix::Vector3d(track.initialPoint[0], track.initialPoint[1], track.initialPoint[2]).allFinite())
             {
                 continue;
             }
@@ -62,8 +87,10 @@ namespace plabundle::internal::plamatrix_ba
                 first_camera = first_camera < 0 ? observation.cameraIndex : first_camera;
                 second_camera = second_camera || observation.cameraIndex != first_camera;
                 double pixel[2] = {0.0, 0.0};
+                double depth = 0.0;
                 const double world[3] = {track.initialPoint[0], track.initialPoint[1], track.initialPoint[2]};
-                if (!cameras[static_cast<std::size_t>(observation.cameraIndex)].projectWorldPoint(world, pixel))
+                if (!cameras[static_cast<std::size_t>(observation.cameraIndex)].projectWorldPointWithDepthAtLine(
+                        world, observation.v, pixel, depth))
                 {
                     positive_depth = false;
                     break;
@@ -116,7 +143,7 @@ namespace plabundle::internal::plamatrix_ba
             }
         }
 
-        if (options.refineCameraPose)
+        if (options.refineCameraPose && options.rig.empty())
         {
             for (std::size_t camera_index = 0; camera_index < cameras.size(); ++camera_index)
             {
@@ -125,6 +152,51 @@ namespace plabundle::internal::plamatrix_ba
                     problem.cameraBlock[camera_index] = problem.cameraBlockCount++;
                 }
             }
+        }
+        else if (options.refineCameraPose)
+        {
+            std::vector<int> capture_blocks(options.rig.captures.size(), -1);
+            std::vector<int> sensor_blocks(options.rig.sensors.size(), -1);
+            for (std::size_t capture_index = 0; capture_index < options.rig.captures.size(); ++capture_index)
+            {
+                bool has_residual = false;
+                bool fixed = options.rig.captures[capture_index].fixedPose;
+                for (std::size_t camera_index = 0; camera_index < cameras.size(); ++camera_index)
+                {
+                    if (problem.rigCaptureIndexByCamera[camera_index] == static_cast<int>(capture_index))
+                    {
+                        has_residual = has_residual || camera_has_residual[camera_index];
+                        fixed = fixed || isCameraFixed(static_cast<int>(camera_index), options) ||
+                                options.referenceGaugeScaleCameraIndex == static_cast<int>(camera_index);
+                    }
+                }
+                if (has_residual && !fixed)
+                {
+                    capture_blocks[capture_index] = problem.rigCaptureBlockCount++;
+                }
+            }
+            for (std::size_t sensor_index = 0; sensor_index < options.rig.sensors.size(); ++sensor_index)
+            {
+                bool has_residual = false;
+                for (std::size_t camera_index = 0; camera_index < cameras.size(); ++camera_index)
+                {
+                    has_residual = has_residual ||
+                                   (problem.rigSensorIndexByCamera[camera_index] == static_cast<int>(sensor_index) &&
+                                    camera_has_residual[camera_index]);
+                }
+                if (has_residual && !options.rig.sensors[sensor_index].fixedExtrinsic)
+                {
+                    sensor_blocks[sensor_index] = problem.rigCaptureBlockCount + problem.rigSensorBlockCount++;
+                }
+            }
+            for (std::size_t camera_index = 0; camera_index < cameras.size(); ++camera_index)
+            {
+                problem.rigCaptureBlockByCamera[camera_index] =
+                    capture_blocks[static_cast<std::size_t>(problem.rigCaptureIndexByCamera[camera_index])];
+                problem.rigSensorBlockByCamera[camera_index] =
+                    sensor_blocks[static_cast<std::size_t>(problem.rigSensorIndexByCamera[camera_index])];
+            }
+            problem.cameraBlockCount = problem.rigCaptureBlockCount + problem.rigSensorBlockCount;
         }
         problem.primaryBlockCount = problem.cameraBlockCount;
 

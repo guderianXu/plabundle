@@ -3,6 +3,49 @@
 
 namespace plabundle
 {
+    namespace
+    {
+        template <typename Calibration>
+        bool parameterEnabled(const Calibration& calibration, IntrinsicParameter parameter) noexcept
+        {
+            bool enabled = false;
+            switch (parameter)
+            {
+            case IntrinsicParameter::FocalLength:
+                enabled = calibration.refineSharedFocalLength;
+                break;
+            case IntrinsicParameter::FocalAspectRatio:
+                enabled = calibration.refineSharedFocalAspectRatio;
+                break;
+            case IntrinsicParameter::PrincipalPointX:
+            case IntrinsicParameter::PrincipalPointY:
+                enabled = calibration.refineSharedPrincipalPoint;
+                break;
+            case IntrinsicParameter::RadialK1:
+                enabled = calibration.refineSharedModelCoefficients || calibration.refineSharedRadialDistortion;
+                break;
+            case IntrinsicParameter::RadialK2:
+            case IntrinsicParameter::RadialK3:
+            case IntrinsicParameter::TangentialP1:
+            case IntrinsicParameter::TangentialP2:
+                enabled = (calibration.refineSharedModelCoefficients || calibration.refineSharedRadialDistortion) &&
+                          calibration.refineSharedHighOrderDistortion;
+                break;
+            case IntrinsicParameter::SkewB2:
+            case IntrinsicParameter::RadialK4:
+            case IntrinsicParameter::TangentialP3:
+            case IntrinsicParameter::TangentialP4:
+                enabled = calibration.refineSharedMetashapeParameters;
+                break;
+            case IntrinsicParameter::Count:
+                return false;
+            }
+
+            const std::size_t index = static_cast<std::size_t>(parameter);
+            return enabled &&
+                   (!calibration.useSharedIntrinsicParameterMask || calibration.sharedIntrinsicParameterMask[index]);
+        }
+    } // namespace
 
     const char* backendName(Backend backend) noexcept
     {
@@ -14,6 +57,8 @@ namespace plabundle
             return "plamatrix_cpu";
         case Backend::PlaMatrixCuda:
             return "plamatrix_cuda";
+        case Backend::PlaMatrixVulkan:
+            return "plamatrix_vulkan";
         case Backend::PlaMatrixOpenCl:
             return "plamatrix_opencl";
         }
@@ -46,34 +91,12 @@ namespace plabundle
 
     bool sharedIntrinsicParameterEnabled(const Options& options, IntrinsicParameter parameter) noexcept
     {
-        bool enabled = false;
-        switch (parameter)
-        {
-        case IntrinsicParameter::FocalLength:
-            enabled = options.refineSharedFocalLength;
-            break;
-        case IntrinsicParameter::FocalAspectRatio:
-            enabled = options.refineSharedFocalAspectRatio;
-            break;
-        case IntrinsicParameter::PrincipalPointX:
-        case IntrinsicParameter::PrincipalPointY:
-            enabled = options.refineSharedPrincipalPoint;
-            break;
-        case IntrinsicParameter::RadialK1:
-            enabled = options.refineSharedRadialDistortion;
-            break;
-        case IntrinsicParameter::RadialK2:
-        case IntrinsicParameter::RadialK3:
-        case IntrinsicParameter::TangentialP1:
-        case IntrinsicParameter::TangentialP2:
-            enabled = options.refineSharedRadialDistortion && options.refineSharedHighOrderDistortion;
-            break;
-        case IntrinsicParameter::Count:
-            return false;
-        }
+        return parameterEnabled(options, parameter);
+    }
 
-        const std::size_t index = static_cast<std::size_t>(parameter);
-        return enabled && (!options.useSharedIntrinsicParameterMask || options.sharedIntrinsicParameterMask[index]);
+    bool sharedIntrinsicParameterEnabled(const SolveOptions& options, IntrinsicParameter parameter) noexcept
+    {
+        return parameterEnabled(options.calibration, parameter);
     }
 
 } // namespace plabundle

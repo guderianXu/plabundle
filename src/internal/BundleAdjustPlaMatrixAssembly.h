@@ -2,17 +2,25 @@
 
 #include "BundleAdjustPlaMatrixProblem.h"
 
-#include <plamatrix/optimization/block_schur.h>
+#include <plamatrix/internal/optimization/block_schur.h>
 
 #include <exception>
 #include <memory>
+#include <stdexcept>
 
 namespace plabundle::internal::plamatrix_ba
 {
 
+    class InvalidProjectionError : public std::runtime_error
+    {
+    public:
+        using std::runtime_error::runtime_error;
+    };
+
     struct OptimizationState
     {
         std::vector<CameraState> cameras;
+        RigTopology rig;
         std::vector<std::array<double, 3>> points;
         std::vector<std::array<double, 3>> laserPoints;
         std::vector<IntrinsicGroupState> intrinsicGroups;
@@ -22,8 +30,8 @@ namespace plabundle::internal::plamatrix_ba
     {
         explicit NormalEquationAssemblyWorkspace(const ActiveProblem& active);
 
-        plamatrix::BlockNormalEquations<double> equations;
-        std::vector<std::unique_ptr<plamatrix::BlockNormalEquations<double>>> partialEquations;
+        plamatrix::internal::BlockNormalEquations<double> equations;
+        std::vector<std::unique_ptr<plamatrix::internal::BlockNormalEquations<double>>> partialEquations;
         std::vector<double> partialCosts;
         std::vector<std::exception_ptr> errors;
         std::vector<std::size_t> trackBoundaries;
@@ -49,7 +57,8 @@ namespace plabundle::internal::plamatrix_ba
                              const BAOptions& options,
                              const ActiveProblem& active,
                              const OptimizationState& state,
-                             int iteration);
+                             int iteration,
+                             NormalEquationAssemblyWorkspace* workspace = nullptr);
 
     double maximumStepNorm(const std::vector<double>& primary_step, const std::vector<double>& eliminated_step);
 

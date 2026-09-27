@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <plabundle/rig.h>
+
 namespace plabundle::internal
 {
 
@@ -61,25 +63,25 @@ namespace plabundle::internal
         bool solutionUsable = false;                          ///< 相机和点结果是否允许写回重建
         bool usedGpu = false;                                 ///< 本次 BA 是否实际启用了 GPU 求解
         bool backendFallback = false;                         ///< 请求后端不可用时是否发生回退
-        std::string backendMessage;                         ///< 后端选择/回退说明，便于 GUI 和日志展示
-        std::string backendSelectionReason;                 ///< Auto 后端选择、拒绝或回退原因
-        bool qualityGateRejected = false;                   ///< Auto 候选后端是否被质量门控拒绝
-        std::string qualityGateMessage;                     ///< 质量门控拒绝细节
-        double validTrackRatio = 0.0;                       ///< optimizedTracks / totalTracks
-        double setupSeconds = 0.0;                          ///< 问题构建或前处理耗时
-        double solveSeconds = 0.0;                          ///< 非线性求解主体耗时
-        double postprocessSeconds = 0.0;                    ///< 统一 RMS、正深度与离群点质量检查耗时
-        double totalSeconds = 0.0;                          ///< BA 后端总耗时
-        int observationCount = 0;                           ///< 实际进入当前后端的有效观测数
-        double plaMatrixInitialCost = 0.0;                  ///< PlaMatrix 初始鲁棒目标函数值
-        double plaMatrixFinalCost = 0.0;                    ///< PlaMatrix 最终鲁棒目标函数值
-        int plaMatrixAcceptedSteps = 0;                     ///< PlaMatrix 接受的 LM trial step 数
-        int plaMatrixRejectedSteps = 0;                     ///< PlaMatrix 拒绝的 LM trial step 数
-        int plaMatrixLinearizations = 0;                    ///< 实际构建 Jacobian/法方程的次数
-        int plaMatrixObjectiveEvaluations = 0;              ///< 完整目标函数遍历次数（含线性化）
-        int plaMatrixRejectedInitialTracks = 0;             ///< PlaMatrix 初始 gross gate 拒绝的 track 数
-        bool plaMatrixReferenceOnlineSchurUsed = false;     ///< 是否实际使用参考在线点 Schur 装配/回代
-        std::string plaMatrixLinearSolverName = "none";     ///< 实际 Schur 线性求解器名称
+        std::string backendMessage;                     ///< 后端选择/回退说明，便于 GUI 和日志展示
+        std::string backendSelectionReason;             ///< Auto 后端选择、拒绝或回退原因
+        bool qualityGateRejected = false;               ///< 具体后端候选或 fallback 是否被质量门控拒绝
+        std::string qualityGateMessage;                 ///< 质量门控拒绝细节
+        double validTrackRatio = 0.0;                   ///< optimizedTracks / totalTracks
+        double setupSeconds = 0.0;                      ///< 问题构建或前处理耗时
+        double solveSeconds = 0.0;                      ///< 非线性求解主体耗时
+        double postprocessSeconds = 0.0;                ///< 统一 RMS、正深度与离群点质量检查耗时
+        double totalSeconds = 0.0;                      ///< BA 后端总耗时
+        int observationCount = 0;                       ///< 实际进入当前后端的有效观测数
+        double plaMatrixInitialCost = 0.0;              ///< PlaMatrix 初始鲁棒目标函数值
+        double plaMatrixFinalCost = 0.0;                ///< PlaMatrix 最终鲁棒目标函数值
+        int plaMatrixAcceptedSteps = 0;                 ///< PlaMatrix 接受的 LM trial step 数
+        int plaMatrixRejectedSteps = 0;                 ///< PlaMatrix 拒绝的 LM trial step 数
+        int plaMatrixLinearizations = 0;                ///< 实际构建 Jacobian/法方程的次数
+        int plaMatrixObjectiveEvaluations = 0;          ///< 完整目标函数遍历次数（含线性化）
+        int plaMatrixRejectedInitialTracks = 0;         ///< PlaMatrix 初始 gross gate 拒绝的 track 数
+        bool plaMatrixReferenceOnlineSchurUsed = false; ///< 是否实际使用参考在线点 Schur 装配/回代
+        std::string plaMatrixLinearSolverName = "none"; ///< 实际 Schur 线性求解器名称
         std::string plaMatrixPreconditionerName = "none";   ///< 实际使用的 Schur 预条件器
         std::string plaMatrixDeviceName;                    ///< 实际执行 Schur PCG 的加速设备名
         int plaMatrixLinearIterations = 0;                  ///< 所有 LM trial 累计 PCG 迭代数
@@ -123,6 +125,10 @@ namespace plabundle::internal
         double refinedSharedRadialK3 = 0.0;         ///< 优化后的标定组平均 Brown-Conrady k3。
         double refinedSharedTangentialP1 = 0.0;     ///< 优化后的标定组平均 Brown-Conrady p1。
         double refinedSharedTangentialP2 = 0.0;     ///< 优化后的标定组平均 Brown-Conrady p2。
+        double refinedSharedSkewB2 = 0.0;           ///< 优化后的标定组平均 Metashape b2（像素）。
+        double refinedSharedRadialK4 = 0.0;         ///< 优化后的标定组平均 Metashape k4。
+        double refinedSharedTangentialP3 = 0.0;     ///< 优化后的标定组平均 Metashape p3。
+        double refinedSharedTangentialP4 = 0.0;     ///< 优化后的标定组平均 Metashape p4。
         /// 参考 BA 过渡先验通过归一化变化检验后可写回到下一轮的内参参数。
         BAIntrinsicParameterMask referenceCommittedIntrinsicParameterMask{};
 
@@ -147,6 +153,7 @@ namespace plabundle::internal
         std::vector<BARefinedPoint> points; ///< 每条轨迹对应的点优化结果（与输入 tracks 索引一一对应）
         std::vector<BARefinedLaserRangeShot> laserRangeShots; ///< 与输入独立测距 shot 一一对应
         std::vector<CameraState> refinedCameras; ///< 优化后的相机列表（与输入 cameras 长度相同）
+        RigTopology refinedRig;                  ///< 优化后的 rig capture/sensor 参数。
     };
 
 } // namespace plabundle::internal

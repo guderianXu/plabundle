@@ -1,6 +1,7 @@
 #include "BundleAdjustPlaMatrixReferenceSchur.h"
 
 #include "BundleAdjustPlaMatrixAssemblyInternal.h"
+#include "BundleAdjustPlaMatrixConstraints.h"
 #include "BundleAdjustValidation.h"
 #include "OpenMpCompat.h"
 
@@ -13,35 +14,29 @@
 
 namespace plabundle::internal::plamatrix_ba
 {
+    void ReferenceSchurPointWorkspace::clear() noexcept
+    {
+        hessian.fill(0.0);
+        rhs.fill(0.0);
+        primaryBlocks.clear();
+        crossBlocks.clear();
+    }
+
+    ReferenceSchurCrossBlock& ReferenceSchurPointWorkspace::crossBlock(plamatrix::Index block)
+    {
+        const auto found = std::find(primaryBlocks.begin(), primaryBlocks.end(), block);
+        if (found != primaryBlocks.end())
+        {
+            return crossBlocks[static_cast<std::size_t>(found - primaryBlocks.begin())];
+        }
+        primaryBlocks.push_back(block);
+        crossBlocks.emplace_back();
+        return crossBlocks.back();
+    }
+
     namespace
     {
-        struct PointNormalBlock
-        {
-            std::array<double, 9> hessian{};
-            std::array<double, 3> rhs{};
-            std::vector<plamatrix::Index> primaryBlocks;
-            std::vector<std::array<double, 27>> crossBlocks;
-
-            void clear()
-            {
-                hessian.fill(0.0);
-                rhs.fill(0.0);
-                primaryBlocks.clear();
-                crossBlocks.clear();
-            }
-
-            std::array<double, 27>& crossBlock(plamatrix::Index block)
-            {
-                const auto found = std::find(primaryBlocks.begin(), primaryBlocks.end(), block);
-                if (found != primaryBlocks.end())
-                {
-                    return crossBlocks[static_cast<std::size_t>(found - primaryBlocks.begin())];
-                }
-                primaryBlocks.push_back(block);
-                crossBlocks.emplace_back();
-                return crossBlocks.back();
-            }
-        };
+        using PointNormalBlock = ReferenceSchurPointWorkspace;
 
         bool invertPointHessian(const std::array<double, 9>& matrix, std::array<double, 9>* inverse)
         {
@@ -228,6 +223,27 @@ namespace plabundle::internal::plamatrix_ba
             }
         }
 
+        void accumulatePointOnlyConstraint(const ConstraintLinearization& linearization, PointNormalBlock* point)
+        {
+            for (int column = 0; column < kEliminatedBlockSize; ++column)
+            {
+                for (int row = 0; row < linearization.residualSize; ++row)
+                {
+                    const double point_value =
+                        linearization.pointJacobian[static_cast<std::size_t>(row * kEliminatedBlockSize + column)];
+                    point->rhs[static_cast<std::size_t>(column)] -=
+                        linearization.normalWeight * point_value *
+                        linearization.residual[static_cast<std::size_t>(row)];
+                    for (int other = 0; other < kEliminatedBlockSize; ++other)
+                    {
+                        point->hessian[static_cast<std::size_t>(column * kEliminatedBlockSize + other)] +=
+                            linearization.normalWeight * point_value *
+                            linearization.pointJacobian[static_cast<std::size_t>(row * kEliminatedBlockSize + other)];
+                    }
+                }
+            }
+        }
+
         bool linearizeTrack(const std::vector<CameraState>& input_cameras,
                             const std::vector<BATrack>& tracks,
                             const BAOptions& options,
@@ -259,7 +275,7 @@ namespace plabundle::internal::plamatrix_ba
                                                                 iteration,
                                                                 &linearization))
                 {
-                    throw std::runtime_error("参考在线 Schur 线性化产生非法投影");
+                    throw InvalidProjectionError("参考在线 Schur 线性化产生非法投影");
                 }
                 *cost += linearization.robustCost;
                 const auto terms =
@@ -273,12 +289,28 @@ namespace plabundle::internal::plamatrix_ba
                     accumulatePointTerms(terms, linearization, point);
                 }
             }
+            if (options.enableControlPointConstraints)
+            {
+                ConstraintLinearization linearization;
+                for (const BAControlPointConstraint& constraint : tracks[track_index].controlPointConstraints)
+                {
+                    if (!linearizeControlPoint(constraint, state.points[track_index], options, &linearization))
+                    {
+                        continue;
+                    }
+                    *cost += linearization.robustCost;
+                    if (eliminate_point)
+                    {
+                        accumulatePointOnlyConstraint(linearization, point);
+                    }
+                }
+            }
             return eliminate_point;
         }
 
-        bool eliminatePoint(double damping, const PointNormalBlock& point, ReducedAccumulator* accumulator)
+        bool eliminatePoint(double damping, PointNormalBlock* point, ReducedAccumulator* accumulator)
         {
-            std::array<double, 9> damped_hessian = point.hessian;
+            std::array<double, 9> damped_hessian = point->hessian;
             for (int diagonal = 0; diagonal < kEliminatedBlockSize; ++diagonal)
             {
                 damped_hessian[static_cast<std::size_t>(diagonal * kEliminatedBlockSize + diagonal)] *= 1.0 + damping;
@@ -289,18 +321,20 @@ namespace plabundle::internal::plamatrix_ba
                 return false;
             }
 
-            std::vector<std::array<double, 27>> reduced_cross(point.crossBlocks.size());
-            std::vector<std::array<char, 9>> active_rows(point.crossBlocks.size());
-            for (std::size_t block = 0; block < point.crossBlocks.size(); ++block)
+            point->reducedCrossBlocks.resize(point->crossBlocks.size());
+            point->activeRows.resize(point->crossBlocks.size());
+            for (std::size_t block = 0; block < point->crossBlocks.size(); ++block)
             {
+                point->reducedCrossBlocks[block].fill(0.0);
+                point->activeRows[block].fill(0);
                 for (int row = 0; row < kPrimaryBlockSize; ++row)
                 {
                     const std::size_t row_offset = static_cast<std::size_t>(row * kEliminatedBlockSize);
-                    active_rows[block][static_cast<std::size_t>(row)] =
-                        point.crossBlocks[block][row_offset] != 0.0 ||
-                        point.crossBlocks[block][row_offset + 1] != 0.0 ||
-                        point.crossBlocks[block][row_offset + 2] != 0.0;
-                    if (!active_rows[block][static_cast<std::size_t>(row)])
+                    point->activeRows[block][static_cast<std::size_t>(row)] =
+                        point->crossBlocks[block][row_offset] != 0.0 ||
+                        point->crossBlocks[block][row_offset + 1] != 0.0 ||
+                        point->crossBlocks[block][row_offset + 2] != 0.0;
+                    if (!point->activeRows[block][static_cast<std::size_t>(row)])
                     {
                         continue;
                     }
@@ -308,15 +342,17 @@ namespace plabundle::internal::plamatrix_ba
                     {
                         for (int inner = 0; inner < kEliminatedBlockSize; ++inner)
                         {
-                            reduced_cross[block][static_cast<std::size_t>(row * kEliminatedBlockSize + column)] +=
-                                point.crossBlocks[block][static_cast<std::size_t>(row * kEliminatedBlockSize + inner)] *
+                            point->reducedCrossBlocks[block]
+                                                     [static_cast<std::size_t>(row * kEliminatedBlockSize + column)] +=
+                                point
+                                    ->crossBlocks[block][static_cast<std::size_t>(row * kEliminatedBlockSize + inner)] *
                                 inverse[static_cast<std::size_t>(inner * kEliminatedBlockSize + column)];
                         }
                     }
                 }
                 for (int row = 0; row < kPrimaryBlockSize; ++row)
                 {
-                    if (!active_rows[block][static_cast<std::size_t>(row)])
+                    if (!point->activeRows[block][static_cast<std::size_t>(row)])
                     {
                         continue;
                     }
@@ -324,26 +360,27 @@ namespace plabundle::internal::plamatrix_ba
                     for (int column = 0; column < kEliminatedBlockSize; ++column)
                     {
                         gradient +=
-                            reduced_cross[block][static_cast<std::size_t>(row * kEliminatedBlockSize + column)] *
-                            point.rhs[static_cast<std::size_t>(column)];
+                            point->reducedCrossBlocks[block]
+                                                     [static_cast<std::size_t>(row * kEliminatedBlockSize + column)] *
+                            point->rhs[static_cast<std::size_t>(column)];
                     }
-                    accumulator->addGradientEntry(point.primaryBlocks[block], row, gradient, false);
+                    accumulator->addGradientEntry(point->primaryBlocks[block], row, gradient, false);
                 }
             }
 
-            for (std::size_t left = 0; left < point.crossBlocks.size(); ++left)
+            for (std::size_t left = 0; left < point->crossBlocks.size(); ++left)
             {
-                for (std::size_t right = left; right < point.crossBlocks.size(); ++right)
+                for (std::size_t right = left; right < point->crossBlocks.size(); ++right)
                 {
                     for (int row = 0; row < kPrimaryBlockSize; ++row)
                     {
-                        if (!active_rows[left][static_cast<std::size_t>(row)])
+                        if (!point->activeRows[left][static_cast<std::size_t>(row)])
                         {
                             continue;
                         }
                         for (int column = 0; column < kPrimaryBlockSize; ++column)
                         {
-                            if (!active_rows[right][static_cast<std::size_t>(column)])
+                            if (!point->activeRows[right][static_cast<std::size_t>(column)])
                             {
                                 continue;
                             }
@@ -351,12 +388,13 @@ namespace plabundle::internal::plamatrix_ba
                             for (int inner = 0; inner < kEliminatedBlockSize; ++inner)
                             {
                                 hessian -=
-                                    reduced_cross[left][static_cast<std::size_t>(row * kEliminatedBlockSize + inner)] *
-                                    point.crossBlocks[right]
-                                                     [static_cast<std::size_t>(column * kEliminatedBlockSize + inner)];
+                                    point->reducedCrossBlocks[left][static_cast<std::size_t>(
+                                        row * kEliminatedBlockSize + inner)] *
+                                    point->crossBlocks[right]
+                                                      [static_cast<std::size_t>(column * kEliminatedBlockSize + inner)];
                             }
                             accumulator->addHessianEntry(
-                                point.primaryBlocks[left], row, point.primaryBlocks[right], column, hessian);
+                                point->primaryBlocks[left], row, point->primaryBlocks[right], column, hessian);
                         }
                     }
                 }
@@ -368,7 +406,7 @@ namespace plabundle::internal::plamatrix_ba
                                        const ActiveProblem& active,
                                        const OptimizationState& state,
                                        int iteration,
-                                       plamatrix::BlockNormalEquations<double>* equations,
+                                       plamatrix::internal::BlockNormalEquations<double>* equations,
                                        std::vector<double>* direct_rhs)
         {
             double cost = 0.0;
@@ -376,9 +414,9 @@ namespace plabundle::internal::plamatrix_ba
             {
                 const auto& group = state.intrinsicGroups[group_index];
                 const auto active_parameters = activeIntrinsicParameters(options, group.enabled, iteration);
-                std::array<double, 9> residual{};
-                std::array<double, 81> jacobian{};
-                for (std::size_t parameter = 0; parameter < 9; ++parameter)
+                std::array<double, kBAIntrinsicParameterCount> residual{};
+                std::array<double, kBAIntrinsicParameterCount * kBAIntrinsicParameterCount> jacobian{};
+                for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
                 {
                     if (!active_parameters[parameter])
                     {
@@ -394,15 +432,17 @@ namespace plabundle::internal::plamatrix_ba
                     const double weight =
                         use_transition ? group.transitionWeight[parameter] : group.inverseSigma[parameter];
                     residual[parameter] = weight * (group.parameters[parameter] - reference);
-                    jacobian[parameter * 9 + parameter] = weight;
+                    jacobian[parameter * kBAIntrinsicParameterCount + parameter] = weight;
                     cost += 0.5 * residual[parameter] * residual[parameter];
                 }
                 const int block = active.cameraBlockCount + static_cast<int>(group_index);
-                equations->addPrimaryResidualBlock(block, jacobian.data(), residual.data(), 9);
+                equations->addPrimaryResidualBlock(
+                    block, jacobian.data(), residual.data(), static_cast<int>(kBAIntrinsicParameterCount));
                 const std::size_t offset = static_cast<std::size_t>(block * kPrimaryBlockSize);
-                for (std::size_t parameter = 0; parameter < 9; ++parameter)
+                for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
                 {
-                    (*direct_rhs)[offset + parameter] -= jacobian[parameter * 9 + parameter] * residual[parameter];
+                    (*direct_rhs)[offset + parameter] -=
+                        jacobian[parameter * kBAIntrinsicParameterCount + parameter] * residual[parameter];
                 }
             }
             return cost;
@@ -478,18 +518,25 @@ namespace plabundle::internal::plamatrix_ba
                         continue;
                     }
                     const std::size_t camera_index = static_cast<std::size_t>(observation.cameraIndex);
-                    const int camera_block = active.cameraBlock[camera_index];
-                    const int intrinsic_block = active.intrinsicBlockByCamera[camera_index];
-                    connect(camera_block, intrinsic_block);
+                    const std::array<int, 4> observation_blocks{{active.cameraBlock[camera_index],
+                                                                 active.rigCaptureBlockByCamera[camera_index],
+                                                                 active.rigSensorBlockByCamera[camera_index],
+                                                                 active.intrinsicBlockByCamera[camera_index]}};
+                    for (std::size_t left = 0; left < observation_blocks.size(); ++left)
+                    {
+                        for (std::size_t right = left + 1; right < observation_blocks.size(); ++right)
+                        {
+                            connect(observation_blocks[left], observation_blocks[right]);
+                        }
+                    }
                     if (active.trackBlock[track_index] >= 0)
                     {
-                        if (camera_block >= 0)
+                        for (const int block : observation_blocks)
                         {
-                            track_blocks.push_back(camera_block);
-                        }
-                        if (intrinsic_block >= 0)
-                        {
-                            track_blocks.push_back(intrinsic_block);
+                            if (block >= 0)
+                            {
+                                track_blocks.push_back(block);
+                            }
                         }
                     }
                 }
@@ -534,9 +581,8 @@ namespace plabundle::internal::plamatrix_ba
     {
         return options.useReferenceOnlineSchur && active.primaryBlockCount > 0 && active.promotedTrackBlockCount == 0 &&
                active.laserBlockCount == 0 && !options.enableLaserPlaneConstraints &&
-               !options.enableControlPointConstraints && !options.enableLaserRangeConstraints &&
-               !options.enableScaleBarConstraints && options.cameraPosePriors.empty() &&
-               !options.cameraPlaneConstraint.enabled;
+               !options.enableLaserRangeConstraints && !options.enableScaleBarConstraints &&
+               options.cameraPosePriors.empty() && !options.cameraPlaneConstraint.enabled;
     }
 
     ReferenceSchurBuildResult buildReferenceReducedNormalEquations(const std::vector<CameraState>& input_cameras,
@@ -562,6 +608,7 @@ namespace plabundle::internal::plamatrix_ba
         workspace->partialCosts.assign(static_cast<std::size_t>(thread_count), 0.0);
         workspace->partialPointSystemSingular.assign(static_cast<std::size_t>(thread_count), 0);
         workspace->errors.assign(static_cast<std::size_t>(thread_count), {});
+        workspace->pointWorkspaces.resize(static_cast<std::size_t>(thread_count));
         const std::size_t primary_dimension = static_cast<std::size_t>(active.primaryBlockCount * kPrimaryBlockSize);
         const std::size_t diagonal_dimension =
             static_cast<std::size_t>(active.primaryBlockCount * kPrimaryBlockSize * kPrimaryBlockSize);
@@ -586,9 +633,11 @@ namespace plabundle::internal::plamatrix_ba
         {
             try
             {
-                PointNormalBlock point;
+                PointNormalBlock& point = workspace->pointWorkspaces[static_cast<std::size_t>(thread)];
                 point.primaryBlocks.reserve(16);
                 point.crossBlocks.reserve(16);
+                point.reducedCrossBlocks.reserve(16);
+                point.activeRows.reserve(16);
                 const std::size_t thread_index = static_cast<std::size_t>(thread);
                 ReducedAccumulator accumulator{
                     &workspace->partialDiagonals[thread_index],
@@ -617,7 +666,7 @@ namespace plabundle::internal::plamatrix_ba
                                        &accumulator,
                                        &point,
                                        &cost) &&
-                        !eliminatePoint(damping, point, &accumulator))
+                        !eliminatePoint(damping, &point, &accumulator))
                     {
                         workspace->partialPointSystemSingular[thread_index] = 1;
                     }
@@ -650,8 +699,8 @@ namespace plabundle::internal::plamatrix_ba
         }
         for (int block = 0; block < active.primaryBlockCount; ++block)
         {
-            std::array<double, 9> gradient{};
-            std::array<double, 81> diagonal{};
+            std::array<double, kPrimaryBlockSize> gradient{};
+            std::array<double, kPrimaryBlockSize * kPrimaryBlockSize> diagonal{};
             const std::size_t gradient_offset = static_cast<std::size_t>(block * kPrimaryBlockSize);
             const std::size_t diagonal_offset = static_cast<std::size_t>(block * kPrimaryBlockSize * kPrimaryBlockSize);
             for (int thread = 0; thread < thread_count; ++thread)
@@ -679,7 +728,7 @@ namespace plabundle::internal::plamatrix_ba
         }
         for (std::size_t block = 0; block < workspace->offDiagonalBlocks.size(); ++block)
         {
-            std::array<double, 81> hessian{};
+            std::array<double, kPrimaryBlockSize * kPrimaryBlockSize> hessian{};
             const std::size_t offset = block * static_cast<std::size_t>(kPrimaryBlockSize * kPrimaryBlockSize);
             for (const auto& slot : workspace->sharedOffDiagonalSlots)
             {
@@ -706,9 +755,14 @@ namespace plabundle::internal::plamatrix_ba
                                                                     double damping,
                                                                     const std::vector<double>& primary_step,
                                                                     const std::vector<double>& direct_primary_rhs,
+                                                                    ReferenceSchurWorkspace* workspace,
                                                                     std::vector<double>* eliminated_step)
     {
         ReferenceSchurBackSubstitutionResult result;
+        if (!workspace || !eliminated_step)
+        {
+            throw std::invalid_argument("参考在线 Schur 回代工作区或输出为空");
+        }
         eliminated_step->assign(static_cast<std::size_t>(active.trackBlockCount * kEliminatedBlockSize), 0.0);
         for (std::size_t parameter = 0; parameter < primary_step.size(); ++parameter)
         {
@@ -716,22 +770,24 @@ namespace plabundle::internal::plamatrix_ba
         }
         const int requested_threads = options.numThreads > 0 ? options.numThreads : openMpMaxThreads();
         const int thread_count = std::min<int>(std::max(1, requested_threads), static_cast<int>(tracks.size()));
-        std::vector<double> partial_directional(static_cast<std::size_t>(thread_count), 0.0);
-        std::vector<char> partial_success(static_cast<std::size_t>(thread_count), 1);
-        std::vector<std::exception_ptr> errors(static_cast<std::size_t>(thread_count));
+        updateTrackBoundaries(tracks, active, thread_count, workspace);
+        workspace->pointWorkspaces.resize(static_cast<std::size_t>(thread_count));
+        workspace->partialDirectionalDecrease.assign(static_cast<std::size_t>(thread_count), 0.0);
+        workspace->partialBackSubstitutionSuccess.assign(static_cast<std::size_t>(thread_count), 1);
+        workspace->errors.assign(static_cast<std::size_t>(thread_count), {});
 
-#pragma omp parallel for num_threads(thread_count) schedule(static)
+#pragma omp parallel for num_threads(thread_count) schedule(static, 1)
         for (int thread = 0; thread < thread_count; ++thread)
         {
             try
             {
-                PointNormalBlock point;
+                PointNormalBlock& point = workspace->pointWorkspaces[static_cast<std::size_t>(thread)];
                 point.primaryBlocks.reserve(16);
                 point.crossBlocks.reserve(16);
-                const std::size_t begin =
-                    tracks.size() * static_cast<std::size_t>(thread) / static_cast<std::size_t>(thread_count);
-                const std::size_t end =
-                    tracks.size() * static_cast<std::size_t>(thread + 1) / static_cast<std::size_t>(thread_count);
+                point.reducedCrossBlocks.reserve(16);
+                point.activeRows.reserve(16);
+                const std::size_t begin = workspace->trackBoundaries[static_cast<std::size_t>(thread)];
+                const std::size_t end = workspace->trackBoundaries[static_cast<std::size_t>(thread + 1)];
                 for (std::size_t track_index = begin; track_index < end; ++track_index)
                 {
                     const int point_block = active.trackBlock[track_index];
@@ -759,7 +815,7 @@ namespace plabundle::internal::plamatrix_ba
                     std::array<double, 9> inverse{};
                     if (!invertPointHessian(damped_hessian, &inverse))
                     {
-                        partial_success[static_cast<std::size_t>(thread)] = 0;
+                        workspace->partialBackSubstitutionSuccess[static_cast<std::size_t>(thread)] = 0;
                         continue;
                     }
                     std::array<double, 3> conditioned_rhs = point.rhs;
@@ -787,7 +843,7 @@ namespace plabundle::internal::plamatrix_ba
                                 inverse[static_cast<std::size_t>(row * kEliminatedBlockSize + column)] *
                                 conditioned_rhs[static_cast<std::size_t>(column)];
                         }
-                        partial_directional[static_cast<std::size_t>(thread)] +=
+                        workspace->partialDirectionalDecrease[static_cast<std::size_t>(thread)] +=
                             point.rhs[static_cast<std::size_t>(row)] *
                             (*eliminated_step)[output_offset + static_cast<std::size_t>(row)];
                     }
@@ -795,18 +851,18 @@ namespace plabundle::internal::plamatrix_ba
             }
             catch (...)
             {
-                errors[static_cast<std::size_t>(thread)] = std::current_exception();
+                workspace->errors[static_cast<std::size_t>(thread)] = std::current_exception();
             }
         }
         for (int thread = 0; thread < thread_count; ++thread)
         {
             const auto index = static_cast<std::size_t>(thread);
-            if (errors[index])
+            if (workspace->errors[index])
             {
-                std::rethrow_exception(errors[index]);
+                std::rethrow_exception(workspace->errors[index]);
             }
-            result.directionalDecrease += partial_directional[index];
-            result.success = result.success && partial_success[index] != 0;
+            result.directionalDecrease += workspace->partialDirectionalDecrease[index];
+            result.success = result.success && workspace->partialBackSubstitutionSuccess[index] != 0;
         }
         return result;
     }

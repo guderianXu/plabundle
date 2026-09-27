@@ -10,6 +10,7 @@ namespace plabundle
         Auto,
         PlaMatrixCpu,
         PlaMatrixCuda,
+        PlaMatrixVulkan,
         PlaMatrixOpenCl,
     };
 

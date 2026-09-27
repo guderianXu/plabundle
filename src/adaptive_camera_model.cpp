@@ -31,6 +31,12 @@ namespace plabundle
             internal::makeCameraStates(problem.cameras), problem.tracks, &solver_options);
     }
 
+    AdaptiveCameraModelAssessment assessAdaptiveCameraModel(const Problem& problem, const SolveOptions& options)
+    {
+        const Options compatibility = makeCompatibilityOptions(options);
+        return assessAdaptiveCameraModel(problem, &compatibility);
+    }
+
     bool applyAdaptiveCameraModel(const AdaptiveCameraModelAssessment& assessment, Options* options)
     {
         if (!options)
@@ -41,6 +47,18 @@ namespace plabundle
         static_cast<Options&>(solver_options) = *options;
         const bool applied = internal::applyAdaptiveCameraModel(assessment, &solver_options);
         *options = static_cast<const Options&>(solver_options);
+        return applied;
+    }
+
+    bool applyAdaptiveCameraModel(const AdaptiveCameraModelAssessment& assessment, SolveOptions* options)
+    {
+        if (!options)
+        {
+            return false;
+        }
+        Options compatibility = makeCompatibilityOptions(*options);
+        const bool applied = applyAdaptiveCameraModel(assessment, &compatibility);
+        *options = makeSolveOptions(compatibility);
         return applied;
     }
 

@@ -18,8 +18,9 @@ namespace plabundle::internal::plamatrix_ba
     {
         bool useReferencePointParameterization(const BAOptions& options)
         {
-            return !options.enableLaserPlaneConstraints && !options.enableControlPointConstraints &&
-                   !options.enableLaserRangeConstraints && !options.enableScaleBarConstraints;
+            return options.rig.empty() && !options.enableLaserPlaneConstraints &&
+                   !options.enableControlPointConstraints && !options.enableLaserRangeConstraints &&
+                   !options.enableScaleBarConstraints;
         }
 
         double referencePointScale(const std::array<double, 3>& point)
@@ -174,21 +175,115 @@ namespace plabundle::internal::plamatrix_ba
     namespace assembly_detail
     {
 
-        ObservationPrimaryTerms observationPrimaryTerms(const BAOptions& options,
-                                                        const ActiveProblem& active,
-                                                        const OptimizationState& state,
-                                                        std::size_t camera_index,
-                                                        const ObservationLinearization& linearization)
+        CameraPosePrimaryTerms cameraPosePrimaryTerms(const BAOptions& options,
+                                                      const ActiveProblem& active,
+                                                      const OptimizationState& state,
+                                                      std::size_t camera_index,
+                                                      const double* camera_jacobian,
+                                                      int residual_size,
+                                                      int row_stride)
         {
-            ObservationPrimaryTerms terms;
-            std::array<double, 18> camera_jacobian{};
-            const bool constrained_center = usesReferenceGaugeTangent(options, state, camera_index);
+            CameraPosePrimaryTerms terms;
+            if (!camera_jacobian || residual_size <= 0 || residual_size > 6 || row_stride < 6)
+            {
+                return terms;
+            }
+            const bool rig_camera = !state.rig.empty();
+            if (camera_index >= active.cameraBlock.size())
+            {
+                return terms;
+            }
+            const bool constrained_center = !rig_camera && usesReferenceGaugeTangent(options, state, camera_index);
             const auto target_basis = constrained_center ? referenceGaugeTargetTangentBasis(options, state)
                                                          : std::array<std::array<double, 3>, 2>{};
-            for (int row = 0; row < 2; ++row)
+            if (rig_camera)
             {
-                std::copy_n(
-                    linearization.cameraJacobian.data() + row * 6, 3, camera_jacobian.data() + row * kPrimaryBlockSize);
+                if (camera_index >= active.rigCaptureIndexByCamera.size() ||
+                    camera_index >= active.rigSensorIndexByCamera.size() ||
+                    active.rigCaptureIndexByCamera[camera_index] < 0 || active.rigSensorIndexByCamera[camera_index] < 0)
+                {
+                    return terms;
+                }
+                const std::size_t capture_index =
+                    static_cast<std::size_t>(active.rigCaptureIndexByCamera[camera_index]);
+                const std::size_t sensor_index = static_cast<std::size_t>(active.rigSensorIndexByCamera[camera_index]);
+                if (capture_index >= state.rig.captures.size() || sensor_index >= state.rig.sensors.size())
+                {
+                    return terms;
+                }
+                const RigCapture& capture = state.rig.captures[capture_index];
+                const RigSensor& sensor = state.rig.sensors[sensor_index];
+                std::array<double, 3> lever_world{};
+                for (int world_axis = 0; world_axis < 3; ++world_axis)
+                {
+                    for (int rig_axis = 0; rig_axis < 3; ++rig_axis)
+                    {
+                        lever_world[static_cast<std::size_t>(world_axis)] +=
+                            capture.rigToWorldRotation[static_cast<std::size_t>(world_axis * 3 + rig_axis)] *
+                            sensor.cameraCenterInRig[static_cast<std::size_t>(rig_axis)];
+                    }
+                }
+
+                if (active.rigCaptureBlockByCamera[camera_index] >= 0)
+                {
+                    auto& capture_jacobian = terms.jacobians[terms.count];
+                    for (int row = 0; row < residual_size; ++row)
+                    {
+                        const double* camera_row = camera_jacobian + row * row_stride;
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            std::array<double, 3> center_derivative{};
+                            center_derivative[static_cast<std::size_t>((axis + 1) % 3)] =
+                                -lever_world[static_cast<std::size_t>((axis + 2) % 3)];
+                            center_derivative[static_cast<std::size_t>((axis + 2) % 3)] =
+                                lever_world[static_cast<std::size_t>((axis + 1) % 3)];
+                            capture_jacobian[static_cast<std::size_t>(row * kPrimaryBlockSize + axis)] =
+                                camera_row[axis];
+                            for (int world_axis = 0; world_axis < 3; ++world_axis)
+                            {
+                                capture_jacobian[static_cast<std::size_t>(row * kPrimaryBlockSize + axis)] +=
+                                    camera_row[3 + world_axis] *
+                                    center_derivative[static_cast<std::size_t>(world_axis)];
+                            }
+                            capture_jacobian[static_cast<std::size_t>(row * kPrimaryBlockSize + 3 + axis)] =
+                                camera_row[3 + axis];
+                        }
+                    }
+                    terms.blocks[terms.count++] = active.rigCaptureBlockByCamera[camera_index];
+                }
+                if (active.rigSensorBlockByCamera[camera_index] >= 0)
+                {
+                    auto& sensor_jacobian = terms.jacobians[terms.count];
+                    for (int row = 0; row < residual_size; ++row)
+                    {
+                        const double* camera_row = camera_jacobian + row * row_stride;
+                        for (int rig_axis = 0; rig_axis < 3; ++rig_axis)
+                        {
+                            for (int world_axis = 0; world_axis < 3; ++world_axis)
+                            {
+                                const double basis =
+                                    capture.rigToWorldRotation[static_cast<std::size_t>(world_axis * 3 + rig_axis)];
+                                sensor_jacobian[static_cast<std::size_t>(row * kPrimaryBlockSize + rig_axis)] +=
+                                    camera_row[world_axis] * basis;
+                                sensor_jacobian[static_cast<std::size_t>(row * kPrimaryBlockSize + 3 + rig_axis)] +=
+                                    camera_row[3 + world_axis] * basis;
+                            }
+                        }
+                    }
+                    terms.blocks[terms.count++] = active.rigSensorBlockByCamera[camera_index];
+                }
+                return terms;
+            }
+
+            if (active.cameraBlock[camera_index] < 0)
+            {
+                return terms;
+            }
+            auto& target = terms.jacobians[0];
+            for (int row = 0; row < residual_size; ++row)
+            {
+                const double* source = camera_jacobian + row * row_stride;
+                std::copy_n(source, 3, target.data() + row * kPrimaryBlockSize);
                 if (constrained_center)
                 {
                     for (std::size_t parameter = 0; parameter < 2; ++parameter)
@@ -196,24 +291,37 @@ namespace plabundle::internal::plamatrix_ba
                         const auto world_basis = targetCenterCoordinates(target_basis[parameter]);
                         for (int axis = 0; axis < 3; ++axis)
                         {
-                            camera_jacobian[static_cast<std::size_t>(row * kPrimaryBlockSize + 3) + parameter] +=
-                                linearization.cameraJacobian[static_cast<std::size_t>(row * 6 + 3 + axis)] *
-                                world_basis[static_cast<std::size_t>(axis)];
+                            target[static_cast<std::size_t>(row * kPrimaryBlockSize + 3) + parameter] +=
+                                source[3 + axis] * world_basis[static_cast<std::size_t>(axis)];
                         }
                     }
                 }
                 else
                 {
-                    std::copy_n(linearization.cameraJacobian.data() + row * 6 + 3,
-                                3,
-                                camera_jacobian.data() + row * kPrimaryBlockSize + 3);
+                    std::copy_n(source + 3, 3, target.data() + row * kPrimaryBlockSize + 3);
                 }
             }
-            if (active.cameraBlock[camera_index] >= 0)
+            terms.blocks[0] = active.cameraBlock[camera_index];
+            terms.count = 1;
+            return terms;
+        }
+
+        ObservationPrimaryTerms observationPrimaryTerms(const BAOptions& options,
+                                                        const ActiveProblem& active,
+                                                        const OptimizationState& state,
+                                                        std::size_t camera_index,
+                                                        const ObservationLinearization& linearization)
+        {
+            ObservationPrimaryTerms terms;
+            const CameraPosePrimaryTerms pose_terms =
+                cameraPosePrimaryTerms(options, active, state, camera_index, linearization.cameraJacobian.data(), 2, 6);
+            const std::size_t pose_count = std::min(pose_terms.count, pose_terms.blocks.size());
+            for (std::size_t index = 0; index < pose_count; ++index)
             {
-                terms.blocks[terms.count] = active.cameraBlock[camera_index];
-                terms.jacobians[terms.count++] = camera_jacobian;
+                terms.blocks[index] = pose_terms.blocks[index];
+                std::copy_n(pose_terms.jacobians[index].data(), 2 * kPrimaryBlockSize, terms.jacobians[index].data());
             }
+            terms.count = pose_count;
             if (active.intrinsicBlockByCamera[camera_index] >= 0)
             {
                 terms.blocks[terms.count] = active.intrinsicBlockByCamera[camera_index];
@@ -225,9 +333,9 @@ namespace plabundle::internal::plamatrix_ba
             return terms;
         }
 
-        std::array<double, 54> paddedPointJacobian(const double* point_jacobian, int residual_size)
+        std::array<double, 6 * kPrimaryBlockSize> paddedPointJacobian(const double* point_jacobian, int residual_size)
         {
-            std::array<double, 54> padded{};
+            std::array<double, 6 * kPrimaryBlockSize> padded{};
             for (int row = 0; row < residual_size; ++row)
             {
                 for (int column = 0; column < 3; ++column)
@@ -239,7 +347,7 @@ namespace plabundle::internal::plamatrix_ba
             return padded;
         }
 
-        void addPointResidual(plamatrix::BlockNormalEquations<double>* equations,
+        void addPointResidual(plamatrix::internal::BlockNormalEquations<double>* equations,
                               int primary_block,
                               int eliminated_block,
                               const double* point_jacobian,
@@ -263,7 +371,7 @@ namespace plabundle::internal::plamatrix_ba
             }
         }
 
-        void addObservation(plamatrix::BlockNormalEquations<double>* equations,
+        void addObservation(plamatrix::internal::BlockNormalEquations<double>* equations,
                             const BAOptions& options,
                             const ActiveProblem& active,
                             const OptimizationState& state,
@@ -278,8 +386,8 @@ namespace plabundle::internal::plamatrix_ba
             }
             const ObservationPrimaryTerms terms =
                 observationPrimaryTerms(options, active, state, camera_index, linearization);
-            std::array<plamatrix::Index, 3> primary_blocks{};
-            std::array<const double*, 3> primary_jacobians{};
+            std::array<plamatrix::Index, 4> primary_blocks{};
+            std::array<const double*, 4> primary_jacobians{};
             std::size_t primary_block_count = terms.count;
             for (std::size_t index = 0; index < terms.count; ++index)
             {
@@ -333,14 +441,14 @@ namespace plabundle::internal::plamatrix_ba
                                        int iteration,
                                        ObservationLinearization* output)
         {
-            constexpr double image_huber_delta = 0.0;
             const bool reference_point_parameterization = useReferencePointParameterization(options);
             if (state.intrinsicGroups.empty())
             {
                 return linearizeObservation(state.cameras[camera_index],
                                             point,
                                             observation,
-                                            image_huber_delta,
+                                            options.imageRobustLoss,
+                                            options.imageRobustLossScalePixels,
                                             output,
                                             true,
                                             reference_point_parameterization);
@@ -357,7 +465,8 @@ namespace plabundle::internal::plamatrix_ba
                                                             active_parameters,
                                                             point,
                                                             observation,
-                                                            image_huber_delta,
+                                                            options.imageRobustLoss,
+                                                            options.imageRobustLossScalePixels,
                                                             output,
                                                             true,
                                                             reference_point_parameterization);
@@ -376,7 +485,7 @@ namespace plabundle::internal::plamatrix_ba
                                   int iteration,
                                   std::size_t begin,
                                   std::size_t end,
-                                  plamatrix::BlockNormalEquations<double>* equations,
+                                  plamatrix::internal::BlockNormalEquations<double>* equations,
                                   int eliminated_block_offset)
         {
             double cost = 0.0;
@@ -405,7 +514,7 @@ namespace plabundle::internal::plamatrix_ba
                                                                     iteration,
                                                                     &linearization))
                     {
-                        throw std::runtime_error("PlaMatrix BA 线性化失败：活动轨迹产生了非法投影");
+                        throw InvalidProjectionError("PlaMatrix BA 线性化失败：活动轨迹产生了非法投影");
                     }
                     cost += linearization.robustCost;
                     assembly_detail::addObservation(equations,
@@ -462,7 +571,7 @@ namespace plabundle::internal::plamatrix_ba
                                       const ActiveProblem& active,
                                       const OptimizationState& state,
                                       int iteration,
-                                      plamatrix::BlockNormalEquations<double>* equations,
+                                      plamatrix::internal::BlockNormalEquations<double>* equations,
                                       NormalEquationAssemblyWorkspace* workspace)
         {
             const int requested_threads = options.numThreads > 0 ? options.numThreads : openMpMaxThreads();
@@ -522,7 +631,7 @@ namespace plabundle::internal::plamatrix_ba
             auto* errors = workspace ? &workspace->errors : &local_errors;
             partial_costs->assign(static_cast<std::size_t>(thread_count), 0.0);
             errors->assign(static_cast<std::size_t>(thread_count), {});
-            std::vector<std::unique_ptr<plamatrix::BlockNormalEquations<double>>> local_partial_equations;
+            std::vector<std::unique_ptr<plamatrix::internal::BlockNormalEquations<double>>> local_partial_equations;
             auto* partial_equations = workspace ? &workspace->partialEquations : &local_partial_equations;
             bool use_eliminated_shards = equations && useReferencePointParameterization(options) &&
                                          active.laserBlockCount == 0 && active.trackBlockCount > 0;
@@ -573,7 +682,7 @@ namespace plabundle::internal::plamatrix_ba
                         partial->primaryBlockSize() != kPrimaryBlockSize ||
                         partial->eliminatedBlockSize() != kEliminatedBlockSize)
                     {
-                        partial = std::make_unique<plamatrix::BlockNormalEquations<double>>(
+                        partial = std::make_unique<plamatrix::internal::BlockNormalEquations<double>>(
                             active.primaryBlockCount, eliminated_count, kPrimaryBlockSize, kEliminatedBlockSize);
                     }
                     else
@@ -636,7 +745,7 @@ namespace plabundle::internal::plamatrix_ba
                            const ActiveProblem& active,
                            const OptimizationState& state,
                            int iteration,
-                           plamatrix::BlockNormalEquations<double>* equations,
+                           plamatrix::internal::BlockNormalEquations<double>* equations,
                            NormalEquationAssemblyWorkspace* workspace)
         {
             return assembleTrackResiduals(
@@ -654,6 +763,7 @@ namespace plabundle::internal::plamatrix_ba
     {
         OptimizationState state;
         state.cameras = cameras;
+        state.rig = options.rig;
         state.points.reserve(tracks.size());
         for (const auto& track : tracks)
         {
@@ -703,9 +813,10 @@ namespace plabundle::internal::plamatrix_ba
                              const BAOptions& options,
                              const ActiveProblem& active,
                              const OptimizationState& state,
-                             int iteration)
+                             int iteration,
+                             NormalEquationAssemblyWorkspace* workspace)
     {
-        return assembleAll(input_cameras, tracks, options, active, state, iteration, nullptr, nullptr);
+        return assembleAll(input_cameras, tracks, options, active, state, iteration, nullptr, workspace);
     }
 
     double maximumStepNorm(const std::vector<double>& primary_step, const std::vector<double>& eliminated_step)
@@ -813,24 +924,87 @@ namespace plabundle::internal::plamatrix_ba
                 value *= step_scale;
             }
         }
-        for (std::size_t camera_index = 0; camera_index < state->cameras.size(); ++camera_index)
+        if (state->rig.empty())
         {
-            const int block = active.cameraBlock[camera_index];
-            if (block >= 0)
+            for (std::size_t camera_index = 0; camera_index < state->cameras.size(); ++camera_index)
             {
-                const double* delta = scaled_primary.data() + block * kPrimaryBlockSize;
-                if (usesReferenceGaugeTangent(options, *state, camera_index))
+                const int block = active.cameraBlock[camera_index];
+                if (block >= 0)
                 {
-                    const auto center = applyReferenceGaugeTangentStep(options, *state, delta[3], delta[4]);
-                    std::array<double, 6> rotation_delta{{delta[0], delta[1], delta[2], 0.0, 0.0, 0.0}};
-                    applyReferenceCameraPoseStep(&state->cameras[camera_index], rotation_delta.data());
-                    state->cameras[camera_index].setCameraCenter(center);
-                }
-                else
-                {
-                    applyReferenceCameraPoseStep(&state->cameras[camera_index], delta);
+                    const double* delta = scaled_primary.data() + block * kPrimaryBlockSize;
+                    if (usesReferenceGaugeTangent(options, *state, camera_index))
+                    {
+                        const auto center = applyReferenceGaugeTangentStep(options, *state, delta[3], delta[4]);
+                        std::array<double, 6> rotation_delta{{delta[0], delta[1], delta[2], 0.0, 0.0, 0.0}};
+                        applyReferenceCameraPoseStep(&state->cameras[camera_index], rotation_delta.data());
+                        state->cameras[camera_index].setCameraCenter(center);
+                    }
+                    else
+                    {
+                        applyReferenceCameraPoseStep(&state->cameras[camera_index], delta);
+                    }
                 }
             }
+        }
+        else
+        {
+            const auto apply_pose = [&](std::array<double, 9>* rotation, std::array<double, 3>* center, int block)
+            {
+                if (block < 0)
+                {
+                    return;
+                }
+                FrameCamera pose;
+                pose.cameraToWorldRotation = *rotation;
+                pose.cameraCenter = *center;
+                pose.focalXPixels = 1.0;
+                pose.focalYPixels = 1.0;
+                const double* raw_delta = scaled_primary.data() + block * kPrimaryBlockSize;
+                const std::array<double, 6> delta{
+                    {raw_delta[0], raw_delta[1], raw_delta[2], raw_delta[3], raw_delta[4], raw_delta[5]}};
+                if (!plabundle::applyPoseDelta(&pose, delta))
+                {
+                    throw std::runtime_error("rig pose update produced an invalid rigid transform");
+                }
+                *rotation = pose.cameraToWorldRotation;
+                *center = pose.cameraCenter;
+            };
+
+            for (std::size_t capture_index = 0; capture_index < state->rig.captures.size(); ++capture_index)
+            {
+                int block = -1;
+                for (std::size_t camera_index = 0; camera_index < state->cameras.size(); ++camera_index)
+                {
+                    if (active.rigCaptureIndexByCamera[camera_index] == static_cast<int>(capture_index))
+                    {
+                        block = active.rigCaptureBlockByCamera[camera_index];
+                        break;
+                    }
+                }
+                RigCapture& capture = state->rig.captures[capture_index];
+                apply_pose(&capture.rigToWorldRotation, &capture.rigCenterInWorld, block);
+            }
+            for (std::size_t sensor_index = 0; sensor_index < state->rig.sensors.size(); ++sensor_index)
+            {
+                int block = -1;
+                for (std::size_t camera_index = 0; camera_index < state->cameras.size(); ++camera_index)
+                {
+                    if (active.rigSensorIndexByCamera[camera_index] == static_cast<int>(sensor_index))
+                    {
+                        block = active.rigSensorBlockByCamera[camera_index];
+                        break;
+                    }
+                }
+                RigSensor& sensor = state->rig.sensors[sensor_index];
+                apply_pose(&sensor.cameraToRigRotation, &sensor.cameraCenterInRig, block);
+            }
+            std::vector<FrameCamera> composed;
+            std::string error;
+            if (!composeRigCameras(makeFrameCameras(state->cameras), state->rig, &composed, &error))
+            {
+                throw std::runtime_error("rig camera composition failed after update: " + error);
+            }
+            state->cameras = makeCameraStates(composed);
         }
         applyIntrinsicStep(active, scaled_primary, &state->intrinsicGroups);
         const bool reference_point_parameterization = useReferencePointParameterization(options);

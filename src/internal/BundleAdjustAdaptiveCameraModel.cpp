@@ -1,4 +1,5 @@
 #include "BundleAdjustAdaptiveCameraModel.h"
+#include "../control_point_internal.h"
 #include "BundleAdjustValidation.h"
 
 #include <algorithm>
@@ -277,6 +278,10 @@ namespace plabundle::internal
                 BAIntrinsicParameter::TangentialP1,
                 BAIntrinsicParameter::TangentialP2,
                 BAIntrinsicParameter::RadialK3,
+                BAIntrinsicParameter::SkewB2,
+                BAIntrinsicParameter::RadialK4,
+                BAIntrinsicParameter::TangentialP3,
+                BAIntrinsicParameter::TangentialP4,
             }};
 
             std::array<double, kBAIntrinsicParameterCount> result{};
@@ -341,6 +346,11 @@ namespace plabundle::internal
             case BAIntrinsicParameter::TangentialP1:
             case BAIntrinsicParameter::TangentialP2:
                 return options.refineSharedRadialDistortion && options.refineSharedHighOrderDistortion;
+            case BAIntrinsicParameter::SkewB2:
+            case BAIntrinsicParameter::RadialK4:
+            case BAIntrinsicParameter::TangentialP3:
+            case BAIntrinsicParameter::TangentialP4:
+                return options.refineSharedMetashapeParameters;
             case BAIntrinsicParameter::Count:
                 return false;
             }
@@ -371,6 +381,14 @@ namespace plabundle::internal
             return "p1";
         case BAIntrinsicParameter::TangentialP2:
             return "p2";
+        case BAIntrinsicParameter::SkewB2:
+            return "b2";
+        case BAIntrinsicParameter::RadialK4:
+            return "k4";
+        case BAIntrinsicParameter::TangentialP3:
+            return "p3";
+        case BAIntrinsicParameter::TangentialP4:
+            return "p4";
         case BAIntrinsicParameter::Count:
             return "unknown";
         }
@@ -417,11 +435,7 @@ namespace plabundle::internal
                             return std::any_of(track.controlPointConstraints.begin(),
                                                track.controlPointConstraints.end(),
                                                [](const BAControlPointConstraint& constraint)
-                                               {
-                                                   return std::isfinite(constraint.sigmaMeters) &&
-                                                          constraint.sigmaMeters > 0.0 &&
-                                                          std::isfinite(constraint.weight) && constraint.weight > 0.0;
-                                               });
+                                               { return validateControlPointConstraint(constraint); });
                         });
         if (options && !result.hasAbsoluteGeometryConstraint)
         {
@@ -547,6 +561,10 @@ namespace plabundle::internal
             0.05,
             0.002,
             0.002,
+            referenceFocal * 0.005,
+            0.10,
+            0.10,
+            0.10,
         }};
 
         InformationMatrix normalMatrix{};
@@ -644,42 +662,22 @@ namespace plabundle::internal
                 {
                     continue;
                 }
-                const CameraState::Distortion distortion = camera.distortion();
-                const double r4 = r2 * r2;
-                const double r6 = r4 * r2;
-                const double radial =
-                    1.0 + distortion.radialK1 * r2 + distortion.radialK2 * r4 + distortion.radialK3 * r6;
-                const double twoXY = 2.0 * x * y;
-                const double distortedX =
-                    x * radial + distortion.tangentialP1 * twoXY + distortion.tangentialP2 * (r2 + 2.0 * x * x);
-                const double distortedY =
-                    y * radial + distortion.tangentialP1 * (r2 + 2.0 * y * y) + distortion.tangentialP2 * twoXY;
-                const double focalX = camera.focalX();
-                const double focalY = camera.focalY();
-                const double signU = static_cast<double>(camera.uAxisSign());
-                const double signV = static_cast<double>(camera.vAxisSign());
-                std::array<double, kBAIntrinsicParameterCount> derivativeU{{
-                    signU * focalX * distortedX,
-                    0.0,
-                    1.0,
-                    0.0,
-                    signU * focalX * x * r2,
-                    signU * focalX * x * r4,
-                    signU * focalX * x * r6,
-                    signU * focalX * twoXY,
-                    signU * focalX * (r2 + 2.0 * x * x),
-                }};
-                std::array<double, kBAIntrinsicParameterCount> derivativeV{{
-                    signV * focalY * distortedY,
-                    signV * focalY * distortedY,
-                    0.0,
-                    1.0,
-                    signV * focalY * y * r2,
-                    signV * focalY * y * r4,
-                    signV * focalY * y * r6,
-                    signV * focalY * (r2 + 2.0 * y * y),
-                    signV * focalY * twoXY,
-                }};
+                ProjectionLinearization model_linearization;
+                if (!linearizeCameraPoint(
+                        camera.frameCamera(), {cameraPoint[0], cameraPoint[1], cameraPoint[2]}, &model_linearization))
+                {
+                    continue;
+                }
+                std::array<double, kBAIntrinsicParameterCount> derivativeU{};
+                std::array<double, kBAIntrinsicParameterCount> derivativeV{};
+                for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
+                {
+                    derivativeU[parameter] = model_linearization.parameterJacobian[parameter];
+                    derivativeV[parameter] =
+                        model_linearization.parameterJacobian[kBAIntrinsicParameterCount + parameter];
+                }
+                derivativeU[parameterIndex(BAIntrinsicParameter::FocalLength)] *= camera.focalX();
+                derivativeV[parameterIndex(BAIntrinsicParameter::FocalLength)] *= camera.focalX();
                 const double weight = sanitizedObservationWeight(observation);
                 std::array<double, 3> pointDerivativeU{};
                 std::array<double, 3> pointDerivativeV{};
@@ -749,16 +747,23 @@ namespace plabundle::internal
             {
                 for (const BAControlPointConstraint& constraint : track.controlPointConstraints)
                 {
-                    if (!std::isfinite(constraint.sigmaMeters) || constraint.sigmaMeters <= 0.0 ||
-                        !std::isfinite(constraint.weight) || constraint.weight <= 0.0)
+                    ControlPointWhitening whitening;
+                    if (!std::isfinite(constraint.weight) || constraint.weight <= 0.0 ||
+                        !makeControlPointWhitening(constraint, &whitening))
                     {
                         continue;
                     }
-                    const double information = std::max(0.0, options->controlPointWeight * constraint.weight) /
-                                               (constraint.sigmaMeters * constraint.sigmaMeters);
-                    for (std::size_t axis = 0; axis < 3; ++axis)
+                    const double weight = std::max(0.0, options->controlPointWeight * constraint.weight);
+                    for (std::size_t row = 0; row < 3; ++row)
                     {
-                        pointInformation[axis][axis] += information;
+                        for (std::size_t column = 0; column < 3; ++column)
+                        {
+                            for (std::size_t inner = 0; inner < 3; ++inner)
+                            {
+                                pointInformation[row][column] +=
+                                    weight * whitening.matrix[inner * 3 + row] * whitening.matrix[inner * 3 + column];
+                            }
+                        }
                     }
                 }
             }
@@ -940,6 +945,16 @@ namespace plabundle::internal
             score(BAIntrinsicParameter::TangentialP1, axisBalance * sectorCoverage, result.geometryStrength);
         result.reliability[parameterIndex(BAIntrinsicParameter::TangentialP2)] =
             score(BAIntrinsicParameter::TangentialP2, axisBalance * sectorCoverage, result.geometryStrength);
+        result.reliability[parameterIndex(BAIntrinsicParameter::SkewB2)] =
+            score(BAIntrinsicParameter::SkewB2, axisBalance * broadRadius, result.geometryStrength);
+        result.reliability[parameterIndex(BAIntrinsicParameter::RadialK4)] =
+            score(BAIntrinsicParameter::RadialK4,
+                  0.65 * extremeRadius + 0.20 * peripheralCoverage + 0.15 * sectorCoverage,
+                  result.geometryStrength);
+        result.reliability[parameterIndex(BAIntrinsicParameter::TangentialP3)] =
+            score(BAIntrinsicParameter::TangentialP3, axisBalance * extremeRadius, result.geometryStrength);
+        result.reliability[parameterIndex(BAIntrinsicParameter::TangentialP4)] =
+            score(BAIntrinsicParameter::TangentialP4, axisBalance * extremeRadius, result.geometryStrength);
 
         const auto enable = [&](BAIntrinsicParameter parameter, double threshold, bool prerequisites)
         {
@@ -976,6 +991,19 @@ namespace plabundle::internal
                0.70,
                result.geometryStrength >= 0.65 && result.normalizedRadiusP90 >= 0.46 &&
                    result.occupiedPeripheralSectors >= 7);
+        enable(BAIntrinsicParameter::SkewB2,
+               0.70,
+               result.geometryStrength >= 0.60 && axisBalance >= 0.60 && result.occupiedPeripheralSectors >= 7);
+        enable(BAIntrinsicParameter::RadialK4,
+               0.76,
+               result.geometryStrength >= 0.72 && result.normalizedRadiusP90 >= 0.55 &&
+                   result.occupiedPeripheralSectors >= 7);
+        enable(BAIntrinsicParameter::TangentialP3,
+               0.76,
+               result.geometryStrength >= 0.72 && result.normalizedRadiusP90 >= 0.55 && axisBalance >= 0.65);
+        enable(BAIntrinsicParameter::TangentialP4,
+               0.80,
+               result.geometryStrength >= 0.78 && result.normalizedRadiusP90 >= 0.62 && axisBalance >= 0.70);
 
         // 无 GCP/相机位姿约束的近俯视航摄块中，焦距、径向畸变、主点和宽高比
         // 都会与航高及地表的低频弯曲耦合。没有可信焦距时保持导入内参不变；
@@ -1064,6 +1092,10 @@ namespace plabundle::internal
                                                    effective[parameterIndex(BAIntrinsicParameter::RadialK3)] ||
                                                    effective[parameterIndex(BAIntrinsicParameter::TangentialP1)] ||
                                                    effective[parameterIndex(BAIntrinsicParameter::TangentialP2)];
+        options->refineSharedMetashapeParameters = effective[parameterIndex(BAIntrinsicParameter::SkewB2)] ||
+                                                   effective[parameterIndex(BAIntrinsicParameter::RadialK4)] ||
+                                                   effective[parameterIndex(BAIntrinsicParameter::TangentialP3)] ||
+                                                   effective[parameterIndex(BAIntrinsicParameter::TangentialP4)];
 
         if (assessment.valid && assessment.opticalAxisConcentration >= 0.90)
         {
@@ -1139,7 +1171,28 @@ namespace plabundle::internal
             {
                 distortion.tangentialP2 = referenceDistortion.tangentialP2;
             }
+            if (!active(BAIntrinsicParameter::RadialK4))
+            {
+                distortion.radialK4 = referenceDistortion.radialK4;
+            }
+            if (!active(BAIntrinsicParameter::TangentialP3))
+            {
+                distortion.tangentialP3 = referenceDistortion.tangentialP3;
+            }
+            if (!active(BAIntrinsicParameter::TangentialP4))
+            {
+                distortion.tangentialP4 = referenceDistortion.tangentialP4;
+            }
             camera.setDistortion(distortion);
+            if (!active(BAIntrinsicParameter::SkewB2))
+            {
+                auto parameters = camera.parameterBlock();
+                parameters[parameterIndex(BAIntrinsicParameter::SkewB2)] =
+                    reference.parameterBlock()[parameterIndex(BAIntrinsicParameter::SkewB2)];
+                CameraParameterMask mask{};
+                mask[parameterIndex(BAIntrinsicParameter::SkewB2)] = true;
+                (void)camera.setParameterBlock(parameters, mask);
+            }
         }
         return true;
     }

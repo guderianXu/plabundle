@@ -4,6 +4,7 @@
 #include <plabundle/camera.h>
 #include <plabundle/constraints.h>
 #include <plabundle/options.h>
+#include <plabundle/rig.h>
 
 #include <array>
 #include <string>
@@ -65,6 +66,10 @@ namespace plabundle
         double refinedSharedRadialK3 = 0.0;
         double refinedSharedTangentialP1 = 0.0;
         double refinedSharedTangentialP2 = 0.0;
+        double refinedSharedSkewB2 = 0.0;
+        double refinedSharedRadialK4 = 0.0;
+        double refinedSharedTangentialP3 = 0.0;
+        double refinedSharedTangentialP4 = 0.0;
         IntrinsicParameterMask referenceCommittedIntrinsicParameterMask{};
         int laserConstraintCount = 0;
         double laserRmsBeforeMeters = 0.0;
@@ -140,6 +145,7 @@ namespace plabundle
         std::vector<RefinedPoint> points;
         std::vector<RefinedLaserRangeShot> laserRangeShots;
         std::vector<FrameCamera> refinedCameras;
+        RigTopology refinedRig;
 
         bool usable() const noexcept
         {

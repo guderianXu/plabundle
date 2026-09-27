@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <stop_token>
@@ -97,6 +98,94 @@ TEST(PlaBundleProblemTest, RejectsIncompleteGaugeAndUnderdeterminedLaserPoints)
     EXPECT_FALSE(plabundle::validateProblem(problem));
 }
 
+TEST(PlaBundleProblemTest, ValidatesRigTopologyAndComposesBoundCameras)
+{
+    plabundle::Problem problem = makeProblem();
+    const std::array<double, 9> identity{{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}};
+    problem.rig.captures = {{0, 0, identity, {-2.0, 0.0, 0.0}, true}, {0, 1, identity, {2.0, 0.0, 0.0}, false}};
+    problem.rig.sensors = {{0, 0, identity, {-0.25, 0.0, 0.0}, true}};
+    problem.rig.cameraBindings = {{0, 0, 0, 0}, {1, 0, 1, 0}};
+    std::vector<plabundle::FrameCamera> composed;
+    std::string error;
+    ASSERT_TRUE(plabundle::composeRigCameras(problem.cameras, problem.rig, &composed, &error)) << error;
+    ASSERT_EQ(composed.size(), 2U);
+    EXPECT_DOUBLE_EQ(composed[0].cameraCenter[0], -2.25);
+    EXPECT_DOUBLE_EQ(composed[1].cameraCenter[0], 1.75);
+    EXPECT_TRUE(plabundle::validateProblem(problem, &error)) << error;
+
+    problem.rig.cameraBindings.pop_back();
+    EXPECT_FALSE(plabundle::validateProblem(problem, &error));
+    EXPECT_NE(error.find("exactly one binding"), std::string::npos);
+}
+
+TEST(PlaBundleProblemTest, RejectsRigWithoutFixedBodyFrameSensor)
+{
+    plabundle::Problem problem = makeProblem();
+    const std::array<double, 9> identity{{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}};
+    problem.rig.captures = {{0, 0, identity, {-2.0, 0.0, 0.0}, true}, {0, 1, identity, {2.0, 0.0, 0.0}, false}};
+    problem.rig.sensors = {{0, 0, identity, {0.0, 0.0, 0.0}, false}};
+    problem.rig.cameraBindings = {{0, 0, 0, 0}, {1, 0, 1, 0}};
+    std::string error;
+    EXPECT_FALSE(plabundle::validateProblem(problem, &error));
+    EXPECT_NE(error.find("fixed sensor extrinsic"), std::string::npos);
+}
+
+TEST(PlaBundleProblemTest, RejectsInvalidPosePriorCovarianceFrameAndRank)
+{
+    plabundle::CameraPosePrior prior;
+    prior.uncertainty = plabundle::PosePriorUncertainty::Covariance;
+    prior.uncertaintyMatrix.fill(0.0);
+    std::string error;
+    EXPECT_FALSE(plabundle::validateCameraPosePrior(prior, &error));
+    EXPECT_NE(error.find("positive definite"), std::string::npos);
+
+    for (int index = 0; index < 6; ++index)
+    {
+        prior.uncertaintyMatrix[static_cast<std::size_t>(index * 6 + index)] = 1.0;
+    }
+    prior.uncertaintyMatrix[1] = 0.25;
+    EXPECT_FALSE(plabundle::validateCameraPosePrior(prior, &error));
+    EXPECT_NE(error.find("symmetric"), std::string::npos);
+
+    prior.uncertaintyMatrix[1] = 0.0;
+    prior.tangentFrame = static_cast<plabundle::PosePriorTangentFrame>(99);
+    EXPECT_FALSE(plabundle::validateCameraPosePrior(prior, &error));
+    EXPECT_NE(error.find("tangent frame"), std::string::npos);
+}
+
+TEST(PlaBundleProblemTest, ValidatesControlPointCovarianceAndRejectsInvalidMatrices)
+{
+    plabundle::ControlPointConstraint constraint;
+    constraint.point = {0.2, -0.1, 5.0};
+    constraint.uncertainty = plabundle::ControlPointUncertainty::Covariance;
+    constraint.uncertaintyMatrix = {0.04, 0.01, 0.0, 0.01, 0.09, 0.0, 0.0, 0.0, 0.16};
+    std::string error;
+    EXPECT_TRUE(plabundle::validateControlPointConstraint(constraint, &error)) << error;
+
+    constraint.uncertaintyMatrix[1] = 0.02;
+    EXPECT_FALSE(plabundle::validateControlPointConstraint(constraint, &error));
+    EXPECT_NE(error.find("symmetric"), std::string::npos);
+
+    constraint.uncertaintyMatrix = {1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0};
+    EXPECT_FALSE(plabundle::validateControlPointConstraint(constraint, &error));
+    EXPECT_NE(error.find("positive definite"), std::string::npos);
+
+    constraint.uncertainty = plabundle::ControlPointUncertainty::SqrtInformation;
+    constraint.uncertaintyMatrix = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+    EXPECT_FALSE(plabundle::validateControlPointConstraint(constraint, &error));
+    EXPECT_NE(error.find("positive definite"), std::string::npos);
+
+    constraint.uncertaintyMatrix = {2.0, 0.1, 0.0, 0.0, 1.5, -0.2, 0.0, 0.0, 1.0};
+    EXPECT_TRUE(plabundle::validateControlPointConstraint(constraint, &error)) << error;
+
+    constraint.uncertaintyMatrix[4] = 0.0;
+
+    plabundle::Problem problem = makeProblem();
+    problem.tracks[0].controlPointConstraints.push_back(constraint);
+    EXPECT_FALSE(plabundle::validateProblem(problem, &error));
+    EXPECT_NE(error.find("control-point"), std::string::npos);
+}
+
 TEST(PlaBundleProblemTest, SolverRunsPlaMatrixCpuAndPublishesAUsableResult)
 {
     plabundle::Options options;
@@ -120,9 +209,33 @@ TEST(PlaBundleProblemTest, SolverRunsPlaMatrixCpuAndPublishesAUsableResult)
     EXPECT_TRUE(plabundle::Solver::backendCapabilities(plabundle::Backend::PlaMatrixCpu).refinesCameraPose);
 }
 
+TEST(PlaBundleProblemTest, StructuredAndCompatibilityOptionsProduceEquivalentResults)
+{
+    plabundle::SolveOptions structured;
+    structured.backend.requested = plabundle::Backend::PlaMatrixCpu;
+    structured.calibration.refineCameraPose = false;
+    structured.solver.enablePointFilter = false;
+    structured.solver.logIterationProgress = false;
+
+    const plabundle::Options compatibility = plabundle::makeCompatibilityOptions(structured);
+    const plabundle::Solver solver;
+    const plabundle::Result structured_result = solver.solve(makeProblem(), structured);
+    const plabundle::Result compatibility_result = solver.solve(makeProblem(), compatibility);
+
+    ASSERT_TRUE(structured_result.usable());
+    ASSERT_TRUE(compatibility_result.usable());
+    EXPECT_EQ(structured_result.status, compatibility_result.status);
+    EXPECT_EQ(structured_result.requestedBackend, compatibility_result.requestedBackend);
+    EXPECT_EQ(structured_result.usedBackend, compatibility_result.usedBackend);
+    ASSERT_EQ(structured_result.points.size(), compatibility_result.points.size());
+    EXPECT_EQ(structured_result.points[0].point, compatibility_result.points[0].point);
+    EXPECT_DOUBLE_EQ(structured_result.quality.meanRmsAfter, compatibility_result.quality.meanRmsAfter);
+}
+
 TEST(PlaBundleProblemTest, AcceleratedBackendsRejectInvalidDeviceWithoutFallback)
 {
-    for (const plabundle::Backend backend : {plabundle::Backend::PlaMatrixCuda, plabundle::Backend::PlaMatrixOpenCl})
+    for (const plabundle::Backend backend :
+         {plabundle::Backend::PlaMatrixCuda, plabundle::Backend::PlaMatrixVulkan, plabundle::Backend::PlaMatrixOpenCl})
     {
         plabundle::Options options;
         options.backend = backend;
@@ -141,7 +254,8 @@ TEST(PlaBundleProblemTest, AcceleratedBackendsRejectInvalidDeviceWithoutFallback
 
 TEST(PlaBundleProblemTest, AcceleratedBackendsFallbackToCpuForInvalidDevice)
 {
-    for (const plabundle::Backend backend : {plabundle::Backend::PlaMatrixCuda, plabundle::Backend::PlaMatrixOpenCl})
+    for (const plabundle::Backend backend :
+         {plabundle::Backend::PlaMatrixCuda, plabundle::Backend::PlaMatrixVulkan, plabundle::Backend::PlaMatrixOpenCl})
     {
         plabundle::Options options;
         options.backend = backend;
@@ -210,4 +324,9 @@ TEST(PlaBundleProblemTest, IntrinsicMaskRefinesOnlyEnabledParameters)
     options.sharedIntrinsicParameterMask[static_cast<std::size_t>(plabundle::IntrinsicParameter::RadialK1)] = true;
     EXPECT_TRUE(plabundle::sharedIntrinsicParameterEnabled(options, plabundle::IntrinsicParameter::RadialK1));
     EXPECT_FALSE(plabundle::sharedIntrinsicParameterEnabled(options, plabundle::IntrinsicParameter::RadialK2));
+
+    options.refineSharedMetashapeParameters = true;
+    options.sharedIntrinsicParameterMask[static_cast<std::size_t>(plabundle::IntrinsicParameter::TangentialP4)] = true;
+    EXPECT_TRUE(plabundle::sharedIntrinsicParameterEnabled(options, plabundle::IntrinsicParameter::TangentialP4));
+    EXPECT_FALSE(plabundle::sharedIntrinsicParameterEnabled(options, plabundle::IntrinsicParameter::SkewB2));
 }

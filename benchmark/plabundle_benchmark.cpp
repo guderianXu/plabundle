@@ -27,7 +27,7 @@ namespace
         int repetitions = 3;
         int deviceIndex = 0;
         bool mixedPrecision = false;
-        std::string backends = "plamatrix_cpu,plamatrix_cuda,plamatrix_opencl,auto";
+        std::string backends = "plamatrix_cpu,plamatrix_cuda,plamatrix_vulkan,plamatrix_opencl,auto";
     };
 
     plabundle::FrameCamera makeCamera(double centerX, double centerY, double centerZ)
@@ -186,6 +186,10 @@ namespace
         {
             return plabundle::Backend::PlaMatrixOpenCl;
         }
+        if (name == "plamatrix_vulkan")
+        {
+            return plabundle::Backend::PlaMatrixVulkan;
+        }
         throw std::invalid_argument("unknown backend: " + name);
     }
 
@@ -202,22 +206,23 @@ namespace
         std::cout << "usage: " << program
                   << " [cameras tracks views iterations threads repetitions backends device mixed_precision]\n"
                   << "  threads: 0 selects the runtime default\n"
-                  << "  backends: comma-separated auto/plamatrix_cpu/plamatrix_cuda/plamatrix_opencl\n"
+                  << "  backends: comma-separated auto/plamatrix_cpu/plamatrix_cuda/plamatrix_vulkan/"
+                     "plamatrix_opencl\n"
                   << "  mixed_precision: 0 or 1; applies to accelerated backends\n";
     }
 
     int runBackend(const plabundle::Problem& problem, const BenchmarkSettings& settings, plabundle::Backend backend)
     {
-        plabundle::Options options;
-        options.backend = backend;
-        options.maxIterations = settings.iterations;
-        options.numThreads = settings.threadCount;
-        options.refineCameraPose = true;
-        options.enablePointFilter = false;
-        options.logIterationProgress = false;
-        options.plaMatrixDevice = settings.deviceIndex;
-        options.enablePlaMatrixMixedPrecision = settings.mixedPrecision;
-        options.allowBackendFallback = false;
+        plabundle::SolveOptions options;
+        options.backend.requested = backend;
+        options.solver.maxIterations = settings.iterations;
+        options.solver.numThreads = settings.threadCount;
+        options.calibration.refineCameraPose = true;
+        options.solver.enablePointFilter = false;
+        options.solver.logIterationProgress = false;
+        options.backend.plaMatrixDevice = settings.deviceIndex;
+        options.backend.enablePlaMatrixMixedPrecision = settings.mixedPrecision;
+        options.backend.allowFallback = false;
 
         const bool runtime_available = plabundle::Solver::isBackendAvailable(backend, settings.deviceIndex);
         int failures = 0;

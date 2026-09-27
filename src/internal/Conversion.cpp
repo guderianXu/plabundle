@@ -26,11 +26,8 @@ namespace plabundle::internal
         BACameraPosePrior makePosePrior(const CameraPosePrior& source)
         {
             BACameraPosePrior target;
+            static_cast<CameraPosePrior&>(target) = source;
             target.enabled = true;
-            target.cameraToWorldRotation = source.cameraToWorldRotation;
-            target.cameraCenter = source.cameraCenter;
-            target.positionSigmaMeters = source.positionSigmaMeters;
-            target.rotationSigmaDegrees = source.rotationSigmaDegrees;
             return target;
         }
 
@@ -83,6 +80,22 @@ namespace plabundle::internal
         static_cast<Options&>(target) = options;
         target.backend = usedBackend;
         target.cameraCalibrationGroupIds = problem.cameraCalibrationGroupIds;
+        if (target.cameraCalibrationGroupIds.empty() && !problem.rig.empty())
+        {
+            target.cameraCalibrationGroupIds.assign(problem.cameras.size(), 0);
+            std::vector<std::pair<int, int>> sensor_keys;
+            for (const RigCameraBinding& binding : problem.rig.cameraBindings)
+            {
+                const std::pair<int, int> key{binding.rigId, binding.sensorId};
+                auto found = std::find(sensor_keys.begin(), sensor_keys.end(), key);
+                if (found == sensor_keys.end())
+                {
+                    found = sensor_keys.insert(sensor_keys.end(), key);
+                }
+                target.cameraCalibrationGroupIds[static_cast<std::size_t>(binding.cameraIndex)] =
+                    static_cast<int>(std::distance(sensor_keys.begin(), found));
+            }
+        }
         target.sharedIntrinsicReferenceCameras = makeCameraStates(problem.sharedIntrinsicReferenceCameras);
         target.referenceGaugeAnchorCameraIndex = problem.gauge.referenceAnchorCameraIndex;
         target.referenceGaugeScaleCameraIndex = problem.gauge.referenceScaleCameraIndex;
@@ -104,7 +117,31 @@ namespace plabundle::internal
         }
         target.gaugePolicy = problem.gauge.policy;
         target.fixedCameraIndices = problem.fixedCameraIndices;
+        if (!problem.rig.empty())
+        {
+            for (const RigCameraBinding& binding : problem.rig.cameraBindings)
+            {
+                const auto capture =
+                    std::find_if(problem.rig.captures.begin(),
+                                 problem.rig.captures.end(),
+                                 [&](const RigCapture& value)
+                                 { return value.rigId == binding.rigId && value.captureId == binding.captureId; });
+                const auto sensor =
+                    std::find_if(problem.rig.sensors.begin(),
+                                 problem.rig.sensors.end(),
+                                 [&](const RigSensor& value)
+                                 { return value.rigId == binding.rigId && value.sensorId == binding.sensorId; });
+                if (capture->fixedPose && sensor->fixedExtrinsic &&
+                    std::find(target.fixedCameraIndices.begin(),
+                              target.fixedCameraIndices.end(),
+                              binding.cameraIndex) == target.fixedCameraIndices.end())
+                {
+                    target.fixedCameraIndices.push_back(binding.cameraIndex);
+                }
+            }
+        }
         target.fixedTrackIndices = problem.fixedTrackIndices;
+        target.rig = problem.rig;
         return target;
     }
 
@@ -149,6 +186,10 @@ namespace plabundle::internal
         target.quality.refinedSharedRadialK3 = source.refinedSharedRadialK3;
         target.quality.refinedSharedTangentialP1 = source.refinedSharedTangentialP1;
         target.quality.refinedSharedTangentialP2 = source.refinedSharedTangentialP2;
+        target.quality.refinedSharedSkewB2 = source.refinedSharedSkewB2;
+        target.quality.refinedSharedRadialK4 = source.refinedSharedRadialK4;
+        target.quality.refinedSharedTangentialP3 = source.refinedSharedTangentialP3;
+        target.quality.refinedSharedTangentialP4 = source.refinedSharedTangentialP4;
         target.quality.referenceCommittedIntrinsicParameterMask = source.referenceCommittedIntrinsicParameterMask;
         target.quality.laserConstraintCount = source.laserConstraintCount;
         target.quality.laserRmsBeforeMeters = source.laserRmsBeforeMeters;
@@ -208,6 +249,7 @@ namespace plabundle::internal
                        std::back_inserter(target.laserRangeShots),
                        makeRefinedLaserRangeShot);
         target.refinedCameras = makeFrameCameras(source.refinedCameras);
+        target.refinedRig = source.refinedRig;
         return target;
     }
 

@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -168,7 +169,12 @@ TEST(PlaBundleAdaptiveCameraModelTest, AbsoluteControlReleasesLowOrderAerialMode
     ASSERT_GT(problem.tracks.size(), 100U);
     for (plabundle::Track& track : problem.tracks)
     {
-        track.controlPointConstraints.push_back({track.initialPoint, 0.02, 1.0, 0});
+        plabundle::ControlPointConstraint control;
+        control.point = track.initialPoint;
+        control.sigmaMeters = std::numeric_limits<double>::quiet_NaN();
+        control.uncertainty = plabundle::ControlPointUncertainty::Covariance;
+        control.uncertaintyMatrix = {4.0e-4, 1.0e-4, 0.0, 1.0e-4, 9.0e-4, 0.0, 0.0, 0.0, 1.6e-3};
+        track.controlPointConstraints.push_back(control);
     }
 
     plabundle::Options options;
@@ -203,19 +209,21 @@ TEST(PlaBundleAdaptiveCameraModelTest, AppliesCallerMaskAndRestoresInactiveParam
     plabundle::AdaptiveCameraModelAssessment assessment;
     assessment.valid = true;
     assessment.enabled.fill(true);
-    plabundle::Options options;
-    options.refineSharedFocalLength = true;
-    options.refineSharedFocalAspectRatio = true;
-    options.refineSharedPrincipalPoint = true;
-    options.refineSharedRadialDistortion = true;
-    options.refineSharedHighOrderDistortion = true;
-    options.useSharedIntrinsicParameterMask = true;
-    options.sharedIntrinsicParameterMask.fill(false);
-    options.sharedIntrinsicParameterMask[static_cast<std::size_t>(plabundle::IntrinsicParameter::FocalLength)] = true;
-    options.sharedIntrinsicParameterMask[static_cast<std::size_t>(plabundle::IntrinsicParameter::RadialK1)] = true;
+    plabundle::SolveOptions options;
+    options.calibration.refineSharedFocalLength = true;
+    options.calibration.refineSharedFocalAspectRatio = true;
+    options.calibration.refineSharedPrincipalPoint = true;
+    options.calibration.refineSharedRadialDistortion = true;
+    options.calibration.refineSharedHighOrderDistortion = true;
+    options.calibration.useSharedIntrinsicParameterMask = true;
+    options.calibration.sharedIntrinsicParameterMask.fill(false);
+    options.calibration
+        .sharedIntrinsicParameterMask[static_cast<std::size_t>(plabundle::IntrinsicParameter::FocalLength)] = true;
+    options.calibration
+        .sharedIntrinsicParameterMask[static_cast<std::size_t>(plabundle::IntrinsicParameter::RadialK1)] = true;
 
     ASSERT_TRUE(plabundle::applyAdaptiveCameraModel(assessment, &options));
-    EXPECT_EQ(plabundle::enabledIntrinsicParameterCount(options.sharedIntrinsicParameterMask), 2);
+    EXPECT_EQ(plabundle::enabledIntrinsicParameterCount(options.calibration.sharedIntrinsicParameterMask), 2);
 
     std::vector<plabundle::FrameCamera> references = aerialCameras();
     std::vector<plabundle::FrameCamera> current = references;

@@ -13,11 +13,19 @@ namespace plabundle::internal
 
         // 位姿先验消除全局刚体漂移；尺度是否同时受约束由后续的基线分析单独判断。
         // 约束数值是否合法和最终是否满足仍由后端及统一质量门控负责。
+        bool priorHasPosition(const BACameraPosePrior& prior)
+        {
+            return prior.components == PosePriorComponents::Position ||
+                   prior.components == PosePriorComponents::RotationAndPosition;
+        }
+
         bool hasEnabledPosePrior(const BAOptions& options)
         {
             return std::any_of(options.cameraPosePriors.begin(),
                                options.cameraPosePriors.end(),
-                               [](const BACameraPosePrior& prior) { return prior.enabled; });
+                               [](const BACameraPosePrior& prior) {
+                                   return prior.enabled && prior.components == PosePriorComponents::RotationAndPosition;
+                               });
         }
 
         bool isFinitePoint(const std::array<double, 3>& point)
@@ -57,14 +65,14 @@ namespace plabundle::internal
             for (size_t left = 0; left < options.cameraPosePriors.size(); ++left)
             {
                 const BACameraPosePrior& first = options.cameraPosePriors[left];
-                if (!first.enabled || !isFinitePoint(first.cameraCenter))
+                if (!first.enabled || !priorHasPosition(first) || !isFinitePoint(first.cameraCenter))
                 {
                     continue;
                 }
                 for (size_t right = left + 1; right < options.cameraPosePriors.size(); ++right)
                 {
                     const BACameraPosePrior& second = options.cameraPosePriors[right];
-                    if (!second.enabled || !isFinitePoint(second.cameraCenter))
+                    if (!second.enabled || !priorHasPosition(second) || !isFinitePoint(second.cameraCenter))
                     {
                         continue;
                     }
@@ -116,7 +124,7 @@ namespace plabundle::internal
             for (size_t prior_index = 0; prior_index < prior_count; ++prior_index)
             {
                 const BACameraPosePrior& prior = options.cameraPosePriors[prior_index];
-                if (!prior.enabled || !isFinitePoint(prior.cameraCenter))
+                if (!prior.enabled || !priorHasPosition(prior) || !isFinitePoint(prior.cameraCenter))
                 {
                     continue;
                 }
@@ -153,8 +161,7 @@ namespace plabundle::internal
                 }
                 for (const BAControlPointConstraint& constraint : track.controlPointConstraints)
                 {
-                    if (!isFinitePoint(constraint.point) || !std::isfinite(constraint.sigmaMeters) ||
-                        constraint.sigmaMeters <= 0.0 || !std::isfinite(constraint.weight) || constraint.weight <= 0.0)
+                    if (!validateControlPointConstraint(constraint))
                     {
                         continue;
                     }
@@ -187,8 +194,7 @@ namespace plabundle::internal
                 }
                 for (const BAControlPointConstraint& constraint : track.controlPointConstraints)
                 {
-                    if (isFinitePoint(constraint.point) && std::isfinite(constraint.sigmaMeters) &&
-                        constraint.sigmaMeters > 0.0 && std::isfinite(constraint.weight) && constraint.weight > 0.0)
+                    if (validateControlPointConstraint(constraint))
                     {
                         points.push_back(constraint.point);
                     }
@@ -386,12 +392,45 @@ namespace plabundle::internal
                                    (cameraError.empty() ? std::string() : ": " + cameraError));
             }
         }
+        if (!requestedOptions.cameraPosePriors.empty() && requestedOptions.cameraPosePriors.size() != cameras.size())
+        {
+            return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 相机位姿先验数量必须与相机数量一致");
+        }
+        for (std::size_t prior_index = 0; prior_index < requestedOptions.cameraPosePriors.size(); ++prior_index)
+        {
+            const BACameraPosePrior& prior = requestedOptions.cameraPosePriors[prior_index];
+            if (!prior.enabled)
+            {
+                continue;
+            }
+            std::string prior_error;
+            if (!validateCameraPosePrior(prior, &prior_error))
+            {
+                return invalid(BASolveStatus::InvalidInput,
+                               "BA 输入验证失败: 相机位姿先验[" + std::to_string(prior_index) +
+                                   "] 非法: " + prior_error);
+            }
+        }
 
         // 第一阶段只验证后端通用的数值域和数组契约。这里提前拒绝可以避免不同后端
         // 对 NaN、负迭代次数或标定分组越界产生不一致行为。
         if (requestedOptions.maxIterations <= 0)
         {
             return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 迭代次数必须大于 0");
+        }
+        switch (requestedOptions.imageRobustLoss)
+        {
+        case ImageRobustLoss::LeastSquares:
+        case ImageRobustLoss::Huber:
+        case ImageRobustLoss::Cauchy:
+            break;
+        default:
+            return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 图像鲁棒损失类型非法");
+        }
+        if (!std::isfinite(requestedOptions.imageRobustLossScalePixels) ||
+            requestedOptions.imageRobustLossScalePixels <= 0.0)
+        {
+            return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 图像鲁棒损失像素尺度必须有限且为正");
         }
         const auto parameterEnabled = [&](BAIntrinsicParameter parameter)
         { return sharedIntrinsicParameterEnabled(requestedOptions, parameter); };
@@ -401,21 +440,17 @@ namespace plabundle::internal
         {
             return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 共享焦距范围非法");
         }
-        const bool extendedSharedIntrinsicEnabled =
-            parameterEnabled(BAIntrinsicParameter::FocalAspectRatio) ||
-            parameterEnabled(BAIntrinsicParameter::PrincipalPointX) ||
-            parameterEnabled(BAIntrinsicParameter::PrincipalPointY) ||
-            parameterEnabled(BAIntrinsicParameter::RadialK1) || parameterEnabled(BAIntrinsicParameter::RadialK2) ||
-            parameterEnabled(BAIntrinsicParameter::RadialK3) || parameterEnabled(BAIntrinsicParameter::TangentialP1) ||
-            parameterEnabled(BAIntrinsicParameter::TangentialP2);
-        const bool trustedFixedFocalRadialK1Only =
-            requestedOptions.hasTrustedSharedFocalPrior && parameterEnabled(BAIntrinsicParameter::RadialK1) &&
-            !parameterEnabled(BAIntrinsicParameter::FocalAspectRatio) &&
-            !parameterEnabled(BAIntrinsicParameter::PrincipalPointX) &&
-            !parameterEnabled(BAIntrinsicParameter::PrincipalPointY) &&
-            !parameterEnabled(BAIntrinsicParameter::RadialK2) && !parameterEnabled(BAIntrinsicParameter::RadialK3) &&
-            !parameterEnabled(BAIntrinsicParameter::TangentialP1) &&
-            !parameterEnabled(BAIntrinsicParameter::TangentialP2);
+        bool extendedSharedIntrinsicEnabled = false;
+        int enabledIntrinsicCount = 0;
+        for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
+        {
+            const bool enabled = parameterEnabled(static_cast<BAIntrinsicParameter>(parameter));
+            enabledIntrinsicCount += enabled ? 1 : 0;
+            extendedSharedIntrinsicEnabled = extendedSharedIntrinsicEnabled || (parameter > 0 && enabled);
+        }
+        const bool trustedFixedFocalRadialK1Only = requestedOptions.hasTrustedSharedFocalPrior &&
+                                                   parameterEnabled(BAIntrinsicParameter::RadialK1) &&
+                                                   enabledIntrinsicCount == 1;
         if (extendedSharedIntrinsicEnabled && !sharedFocalEnabled && !trustedFixedFocalRadialK1Only)
         {
             return invalid(BASolveStatus::InvalidInput,
@@ -445,18 +480,31 @@ namespace plabundle::internal
             !std::isfinite(requestedOptions.maxSharedRadialK3Abs) ||
             !std::isfinite(requestedOptions.maxSharedTangentialP1Abs) ||
             !std::isfinite(requestedOptions.maxSharedTangentialP2Abs) ||
+            !std::isfinite(requestedOptions.maxSharedSkewFraction) ||
+            !std::isfinite(requestedOptions.maxSharedRadialK4Abs) ||
+            !std::isfinite(requestedOptions.maxSharedTangentialP3Abs) ||
+            !std::isfinite(requestedOptions.maxSharedTangentialP4Abs) ||
             !std::isfinite(requestedOptions.sharedRadialK1PriorSigma) ||
             !std::isfinite(requestedOptions.sharedRadialK2PriorSigma) ||
             !std::isfinite(requestedOptions.sharedRadialK3PriorSigma) ||
             !std::isfinite(requestedOptions.sharedTangentialP1PriorSigma) ||
             !std::isfinite(requestedOptions.sharedTangentialP2PriorSigma) ||
+            !std::isfinite(requestedOptions.sharedSkewPriorSigmaFraction) ||
+            !std::isfinite(requestedOptions.sharedRadialK4PriorSigma) ||
+            !std::isfinite(requestedOptions.sharedTangentialP3PriorSigma) ||
+            !std::isfinite(requestedOptions.sharedTangentialP4PriorSigma) ||
             !std::isfinite(requestedOptions.sharedLowOrderDistortionScale) ||
             requestedOptions.maxSharedRadialK1Abs <= 0.0 || requestedOptions.maxSharedRadialK2Abs <= 0.0 ||
             requestedOptions.maxSharedRadialK3Abs <= 0.0 || requestedOptions.maxSharedTangentialP1Abs <= 0.0 ||
-            requestedOptions.maxSharedTangentialP2Abs <= 0.0 || requestedOptions.sharedRadialK1PriorSigma <= 0.0 ||
+            requestedOptions.maxSharedTangentialP2Abs <= 0.0 || requestedOptions.maxSharedSkewFraction <= 0.0 ||
+            requestedOptions.maxSharedRadialK4Abs <= 0.0 || requestedOptions.maxSharedTangentialP3Abs <= 0.0 ||
+            requestedOptions.maxSharedTangentialP4Abs <= 0.0 || requestedOptions.sharedRadialK1PriorSigma <= 0.0 ||
             requestedOptions.sharedRadialK2PriorSigma <= 0.0 || requestedOptions.sharedRadialK3PriorSigma <= 0.0 ||
             requestedOptions.sharedTangentialP1PriorSigma <= 0.0 ||
             requestedOptions.sharedTangentialP2PriorSigma <= 0.0 ||
+            requestedOptions.sharedSkewPriorSigmaFraction <= 0.0 || requestedOptions.sharedRadialK4PriorSigma <= 0.0 ||
+            requestedOptions.sharedTangentialP3PriorSigma <= 0.0 ||
+            requestedOptions.sharedTangentialP4PriorSigma <= 0.0 ||
             requestedOptions.sharedLowOrderDistortionScale < 1.0)
         {
             return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 共享径向畸变边界或先验非法");
@@ -471,6 +519,38 @@ namespace plabundle::internal
         {
             return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 共享内参参考相机数量必须与相机数量一致");
         }
+        if (sharedFocalEnabled || extendedSharedIntrinsicEnabled)
+        {
+            for (std::size_t first = 0; first < cameras.size(); ++first)
+            {
+                const int first_group = requestedOptions.cameraCalibrationGroupIds.empty()
+                                            ? 0
+                                            : requestedOptions.cameraCalibrationGroupIds[first];
+                if (!requestedOptions.sharedIntrinsicReferenceCameras.empty() &&
+                    (requestedOptions.sharedIntrinsicReferenceCameras[first].projectionModel() !=
+                         cameras[first].projectionModel() ||
+                     requestedOptions.sharedIntrinsicReferenceCameras[first].frameCamera().brownTangentialConvention !=
+                         cameras[first].frameCamera().brownTangentialConvention))
+                {
+                    return invalid(BASolveStatus::InvalidInput,
+                                   "BA 输入验证失败: 共享内参参考相机与输入相机的投影模型和畸变约定必须一致");
+                }
+                for (std::size_t second = first + 1; second < cameras.size(); ++second)
+                {
+                    const int second_group = requestedOptions.cameraCalibrationGroupIds.empty()
+                                                 ? 0
+                                                 : requestedOptions.cameraCalibrationGroupIds[second];
+                    if (first_group == second_group &&
+                        (cameras[first].projectionModel() != cameras[second].projectionModel() ||
+                         cameras[first].frameCamera().brownTangentialConvention !=
+                             cameras[second].frameCamera().brownTangentialConvention))
+                    {
+                        return invalid(BASolveStatus::InvalidInput,
+                                       "BA 输入验证失败: 同一共享标定组不能混用不同投影模型或畸变约定");
+                    }
+                }
+            }
+        }
         if (std::any_of(requestedOptions.sharedIntrinsicReferenceCameras.begin(),
                         requestedOptions.sharedIntrinsicReferenceCameras.end(),
                         [](const CameraState& camera)
@@ -482,7 +562,10 @@ namespace plabundle::internal
                                    intrinsics.focalY <= 0.0 || !std::isfinite(intrinsics.principalX) ||
                                    !std::isfinite(intrinsics.principalY) || !std::isfinite(distortion.radialK1) ||
                                    !std::isfinite(distortion.radialK2) || !std::isfinite(distortion.radialK3) ||
-                                   !std::isfinite(distortion.tangentialP1) || !std::isfinite(distortion.tangentialP2);
+                                   !std::isfinite(distortion.tangentialP1) || !std::isfinite(distortion.tangentialP2) ||
+                                   !std::isfinite(distortion.radialK4) || !std::isfinite(distortion.tangentialP3) ||
+                                   !std::isfinite(distortion.tangentialP4) ||
+                                   !std::isfinite(camera.frameCamera().skewPixels);
                         }))
         {
             return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 共享内参参考相机包含非法标定参数");
@@ -592,9 +675,11 @@ namespace plabundle::internal
                         constraint.initialPoint[2],
                     };
                     double pixel[2] = {0.0, 0.0};
+                    double depth = 0.0;
                     measuredInitialPointProjects =
                         measuredInitialPointProjects &&
-                        cameras[static_cast<size_t>(observation.cameraIndex)].projectWorldPoint(world, pixel);
+                        cameras[static_cast<size_t>(observation.cameraIndex)].projectWorldPointWithDepthAtLine(
+                            world, observation.v, pixel, depth);
                 }
                 if (!measuredInitialPointProjects)
                 {

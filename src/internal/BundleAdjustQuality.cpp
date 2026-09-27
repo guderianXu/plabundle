@@ -3,8 +3,8 @@
 #include "BundleAdjustValidation.h"
 #include "ParallelFor.h"
 
-#include <plamatrix/ops/statistics.h>
-#include <plamatrix/ops/vector.h>
+#include <plamatrix/internal/ops/statistics.h>
+#include <plamatrix/dense/matrix.h>
 
 #include <algorithm>
 #include <array>
@@ -74,7 +74,7 @@ namespace plabundle::internal
             stats.rms = stats.count > 0 ? std::sqrt(sumSquared / static_cast<double>(stats.count)) : 0.0;
             if (!distances.empty())
             {
-                stats.median = plamatrix::finiteMedian(std::move(distances)).value_or(0.0);
+                stats.median = plamatrix::internal::finiteMedian(std::move(distances)).value_or(0.0);
             }
             return stats;
         }
@@ -142,7 +142,8 @@ namespace plabundle::internal
                     sumSquaredBefore += beforeResidual * beforeResidual;
                 }
 
-                const bool validPoint = shot.valid && plamatrix::isFinite(plamatrix::Vec3<double>(shot.point));
+                const bool validPoint =
+                    shot.valid && plamatrix::Vector3d(shot.point[0], shot.point[1], shot.point[2]).allFinite();
                 const double afterRange =
                     validPoint ? computedLaserRange(refinedCameras[static_cast<size_t>(constraint.cameraIndex)],
                                                     constraint.leverArmCameraMeters,
@@ -303,7 +304,7 @@ namespace plabundle::internal
                               const std::array<double, 3>& point,
                               bool whitenByMeasurementScale)
         {
-            if (!plamatrix::isFinite(plamatrix::Vec3<double>(point)))
+            if (!plamatrix::Vector3d(point[0], point[1], point[2]).allFinite())
             {
                 return std::numeric_limits<double>::infinity();
             }
@@ -395,7 +396,7 @@ namespace plabundle::internal
             return threshold;
         }
 
-        const double median = plamatrix::finiteMedian(std::move(finiteValues)).value_or(0.0);
+        const double median = plamatrix::internal::finiteMedian(std::move(finiteValues)).value_or(0.0);
         return std::max(threshold, medianFactor * median);
     }
 
@@ -438,8 +439,8 @@ namespace plabundle::internal
                 }
 
                 point.rmsAfter = strictTrackRms(refinedCameras, tracks[index], point.point, useMeasurementScale);
-                point.valid =
-                    plamatrix::isFinite(plamatrix::Vec3<double>(point.point)) && std::isfinite(point.rmsAfter);
+                point.valid = plamatrix::Vector3d(point.point[0], point.point[1], point.point[2]).allFinite() &&
+                              std::isfinite(point.rmsAfter);
                 if (point.valid)
                 {
                     candidateRmsByTrack[index] = point.rmsAfter;
@@ -504,6 +505,7 @@ namespace plabundle::internal
                                         double rmsBefore,
                                         double rmsAfter,
                                         double maxGrowth,
+                                        double rmsUncertainty,
                                         const char* constraintName,
                                         std::string* message)
     {
@@ -513,32 +515,23 @@ namespace plabundle::internal
         }
 
         const std::string name = constraintName && constraintName[0] != '\0' ? constraintName : "物方约束";
-        if (!std::isfinite(rmsBefore) || !std::isfinite(rmsAfter))
+        if (!std::isfinite(rmsBefore) || !std::isfinite(rmsAfter) || !std::isfinite(rmsUncertainty) ||
+            rmsUncertainty < 0.0)
         {
             if (message)
             {
-                *message = "质量门控拒绝: " + name + " RMS 非有限";
+                *message = "质量门控拒绝: " + name + " RMS 或不确定度无效";
             }
             return false;
         }
 
         const double growth = std::max(1.0, maxGrowth);
-        if (rmsBefore > 1.0e-12)
-        {
-            if (rmsAfter > rmsBefore * growth)
-            {
-                if (message)
-                {
-                    *message = "质量门控拒绝: " + name + " RMS 增长超过阈值";
-                }
-                return false;
-            }
-        }
-        else if (rmsAfter > 1.0e-9)
+        const double allowed_rms = growth * std::max(rmsBefore, rmsUncertainty);
+        if (rmsAfter > allowed_rms)
         {
             if (message)
             {
-                *message = "质量门控拒绝: " + name + " 零残差被优化为非零残差";
+                *message = "质量门控拒绝: " + name + " RMS 超过增长/测量不确定度阈值";
             }
             return false;
         }

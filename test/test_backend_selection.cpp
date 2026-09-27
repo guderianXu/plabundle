@@ -33,8 +33,10 @@ namespace
 TEST(PlaBundleBackendSelectionTest, ExplicitBackendBypassesAutoScalePolicy)
 {
     const plabundle::Problem problem = makeProblem();
-    for (const plabundle::Backend backend :
-         {plabundle::Backend::PlaMatrixCpu, plabundle::Backend::PlaMatrixCuda, plabundle::Backend::PlaMatrixOpenCl})
+    for (const plabundle::Backend backend : {plabundle::Backend::PlaMatrixCpu,
+                                             plabundle::Backend::PlaMatrixCuda,
+                                             plabundle::Backend::PlaMatrixVulkan,
+                                             plabundle::Backend::PlaMatrixOpenCl})
     {
         plabundle::Options options;
         options.backend = backend;
@@ -57,10 +59,13 @@ TEST(PlaBundleBackendSelectionTest, PointOnlyAndSmallJointProblemsUseCpu)
     options.refineCameraPose = true;
     options.minPlaMatrixCudaCameras = 50;
     options.minPlaMatrixCudaObservations = 500000;
+    options.minPlaMatrixVulkanCameras = 50;
+    options.minPlaMatrixVulkanObservations = 500000;
     options.minPlaMatrixOpenClCameras = 50;
     options.minPlaMatrixOpenClObservations = 500000;
     options.minPlaMatrixDenseCameras = 50;
     options.minPlaMatrixCudaDenseObservations = 500000;
+    options.minPlaMatrixVulkanDenseObservations = 500000;
     options.minPlaMatrixOpenClDenseObservations = 500000;
     decision = plabundle::Solver::decideBackendForProblem(problem, options);
     EXPECT_EQ(decision.backend, plabundle::Backend::PlaMatrixCpu);
@@ -76,6 +81,8 @@ TEST(PlaBundleBackendSelectionTest, SoftConstraintParticipatesInJointSolverDecis
     options.refineCameraPose = false;
     options.minPlaMatrixCudaCameras = 1000;
     options.minPlaMatrixCudaObservations = 1000000;
+    options.minPlaMatrixVulkanCameras = 1000;
+    options.minPlaMatrixVulkanObservations = 1000000;
     options.minPlaMatrixOpenClCameras = 1000;
     options.minPlaMatrixOpenClObservations = 1000000;
     options.minPlaMatrixDenseCameras = 1000;
@@ -94,25 +101,31 @@ TEST(PlaBundleBackendSelectionTest, PolicyThresholdsMatchMeasuredCrossovers)
     EXPECT_FALSE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixCuda, stats, options));
     EXPECT_FALSE(
         plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixOpenCl, stats, options));
+    EXPECT_FALSE(
+        plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixVulkan, stats, options));
 
     stats.cameraCount = 128;
     stats.observationCount = 40960;
     EXPECT_TRUE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixCuda, stats, options));
     EXPECT_FALSE(
         plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixOpenCl, stats, options));
+    EXPECT_FALSE(
+        plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixVulkan, stats, options));
 
     stats.cameraCount = 160;
     stats.observationCount = 51200;
     EXPECT_TRUE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixCuda, stats, options));
+    EXPECT_TRUE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixVulkan, stats, options));
     EXPECT_TRUE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixOpenCl, stats, options));
 
     stats.cameraCount = 123;
     stats.observationCount = 223593;
     EXPECT_TRUE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixCuda, stats, options));
+    EXPECT_TRUE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixVulkan, stats, options));
     EXPECT_TRUE(plabundle::Solver::autoBackendMeetsScaleThreshold(plabundle::Backend::PlaMatrixOpenCl, stats, options));
 }
 
-TEST(PlaBundleBackendSelectionTest, AutoPrefersAvailableCudaThenOpenCl)
+TEST(PlaBundleBackendSelectionTest, AutoPrefersAvailableCudaThenVulkanThenOpenCl)
 {
     const plabundle::Problem problem = makeProblem();
     plabundle::Options options;
@@ -120,6 +133,8 @@ TEST(PlaBundleBackendSelectionTest, AutoPrefersAvailableCudaThenOpenCl)
     options.refineCameraPose = true;
     options.minPlaMatrixCudaCameras = 1;
     options.minPlaMatrixCudaObservations = 1;
+    options.minPlaMatrixVulkanCameras = 1;
+    options.minPlaMatrixVulkanObservations = 1;
     options.minPlaMatrixOpenClCameras = 1;
     options.minPlaMatrixOpenClObservations = 1;
 
@@ -128,6 +143,11 @@ TEST(PlaBundleBackendSelectionTest, AutoPrefersAvailableCudaThenOpenCl)
     {
         EXPECT_EQ(decision.backend, plabundle::Backend::PlaMatrixCuda);
         EXPECT_EQ(decision.reason, "large_joint_problem_uses_plamatrix_cuda");
+    }
+    else if (plabundle::Solver::isBackendAvailable(plabundle::Backend::PlaMatrixVulkan, options.plaMatrixDevice))
+    {
+        EXPECT_EQ(decision.backend, plabundle::Backend::PlaMatrixVulkan);
+        EXPECT_EQ(decision.reason, "large_joint_problem_uses_plamatrix_vulkan");
     }
     else if (plabundle::Solver::isBackendAvailable(plabundle::Backend::PlaMatrixOpenCl, options.plaMatrixDevice))
     {
@@ -146,6 +166,7 @@ TEST(PlaBundleBackendSelectionTest, CapabilitiesAreIndependentOfRuntimeAvailabil
     for (const plabundle::Backend backend : {plabundle::Backend::Auto,
                                              plabundle::Backend::PlaMatrixCpu,
                                              plabundle::Backend::PlaMatrixCuda,
+                                             plabundle::Backend::PlaMatrixVulkan,
                                              plabundle::Backend::PlaMatrixOpenCl})
     {
         const plabundle::BackendCapabilities capabilities = plabundle::Solver::backendCapabilities(backend);
@@ -161,5 +182,6 @@ TEST(PlaBundleBackendSelectionTest, CapabilitiesAreIndependentOfRuntimeAvailabil
 
     EXPECT_FALSE(plabundle::Solver::backendCapabilities(static_cast<plabundle::Backend>(99)).optimizesPoints);
     EXPECT_FALSE(plabundle::Solver::isBackendAvailable(plabundle::Backend::PlaMatrixCuda, 9999));
+    EXPECT_FALSE(plabundle::Solver::isBackendAvailable(plabundle::Backend::PlaMatrixVulkan, 9999));
     EXPECT_FALSE(plabundle::Solver::isBackendAvailable(plabundle::Backend::PlaMatrixOpenCl, 9999));
 }

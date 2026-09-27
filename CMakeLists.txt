@@ -42,8 +42,16 @@ add_library(plabundle STATIC
     src/adaptive_camera_model.cpp
     src/backend.cpp
     src/camera.cpp
+    src/control_point.cpp
+    src/linescan.cpp
+    src/linescan_assembly.cpp
+    src/linescan_model.cpp
+    src/linescan_plamatrix.cpp
     src/options.cpp
+    src/photo_alignment.cpp
+    src/pose_prior.cpp
     src/problem.cpp
+    src/rig.cpp
     src/solver.cpp
     src/internal/BundleAdjustAdaptiveCameraModel.cpp
     src/internal/BundleAdjustPlaMatrix.cpp

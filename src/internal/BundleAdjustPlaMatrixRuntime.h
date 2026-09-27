@@ -2,13 +2,13 @@
 
 #include "BundleAdjustTypes.h"
 
-#include <plamatrix/optimization/block_schur.h>
+#include <plamatrix/internal/optimization/block_schur.h>
 
 namespace plabundle::internal
 {
 
-    plamatrix::SchurComplementLinearBackend plaMatrixLinearBackend(BABackend backend);
+    plamatrix::internal::SchurComplementLinearBackend plaMatrixLinearBackend(BABackend backend);
 
-    const char* plaMatrixLinearBackendName(plamatrix::SchurComplementLinearBackend backend);
+    const char* plaMatrixLinearBackendName(plamatrix::internal::SchurComplementLinearBackend backend);
 
 } // namespace plabundle::internal

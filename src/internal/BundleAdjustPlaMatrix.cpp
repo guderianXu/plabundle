@@ -7,7 +7,7 @@
 #include "BundleAdjustQuality.h"
 #include "BundleAdjustValidation.h"
 
-#include <plamatrix/optimization/block_schur.h>
+#include <plamatrix/internal/optimization/block_schur.h>
 
 #include <algorithm>
 #include <chrono>
@@ -37,6 +37,24 @@ namespace plabundle::internal
             return message.find("breakdown") != std::string::npos ||
                    message.find("positive definite") != std::string::npos ||
                    message.find("numerically SPD") != std::string::npos;
+        }
+
+        double evaluateCandidateObjective(const std::vector<CameraState>& cameras,
+                                          const std::vector<BATrack>& tracks,
+                                          const BAOptions& options,
+                                          const ActiveProblem& active,
+                                          const plamatrix_ba::OptimizationState& state,
+                                          int iteration,
+                                          plamatrix_ba::NormalEquationAssemblyWorkspace* workspace)
+        {
+            try
+            {
+                return plamatrix_ba::evaluateObjective(cameras, tracks, options, active, state, iteration, workspace);
+            }
+            catch (const plamatrix_ba::InvalidProjectionError&)
+            {
+                return std::numeric_limits<double>::infinity();
+            }
         }
 
         bool
@@ -81,17 +99,13 @@ namespace plabundle::internal
                 *dimension += count;
             };
 
-            for (std::size_t camera_index = 0; camera_index < active.cameraBlock.size(); ++camera_index)
+            for (int block = 0; block < active.cameraBlockCount; ++block)
             {
-                const int block = active.cameraBlock[camera_index];
-                if (block >= 0)
-                {
-                    accumulate(primary_step,
-                               static_cast<std::size_t>(block * plamatrix_ba::kPrimaryBlockSize),
-                               6,
-                               &global_squared,
-                               &global_dimension);
-                }
+                accumulate(primary_step,
+                           static_cast<std::size_t>(block * plamatrix_ba::kPrimaryBlockSize),
+                           6,
+                           &global_squared,
+                           &global_dimension);
             }
             for (std::size_t group_index = 0; group_index < state.intrinsicGroups.size(); ++group_index)
             {
@@ -154,6 +168,7 @@ namespace plabundle::internal
         result.usedBackend = options.backend;
         auto solver_backend = plaMatrixLinearBackend(options.backend);
         result.refinedCameras = cameras;
+        result.refinedRig = options.rig;
         result.totalTracks = static_cast<int>(tracks.size());
         result.points.resize(tracks.size());
         for (std::size_t index = 0; index < tracks.size(); ++index)
@@ -198,7 +213,7 @@ namespace plabundle::internal
         int iterations = 0;
         double minimum_linear_tolerance = std::numeric_limits<double>::infinity();
         double maximum_linear_tolerance = 0.0;
-        plamatrix::SchurComplementSolverWorkspace<double> solver_workspace;
+        plamatrix::internal::SchurComplementSolverWorkspace<double> solver_workspace;
         plamatrix_ba::NormalEquationAssemblyWorkspace assembly_workspace(active);
         plamatrix_ba::ReferenceSchurWorkspace reference_schur_workspace(active);
         const bool use_reference_online_schur = plamatrix_ba::canUseReferenceOnlineSchur(options, active);
@@ -211,7 +226,8 @@ namespace plabundle::internal
         {
             if (converged)
             {
-                current_cost = plamatrix_ba::evaluateObjective(cameras, tracks, options, active, state, 0);
+                current_cost =
+                    plamatrix_ba::evaluateObjective(cameras, tracks, options, active, state, 0, &assembly_workspace);
                 result.plaMatrixInitialCost = current_cost;
                 ++result.plaMatrixObjectiveEvaluations;
             }
@@ -290,13 +306,13 @@ namespace plabundle::internal
                         }
                     }
 
-                    plamatrix::SchurComplementSolverOptions<double> solver_options;
+                    plamatrix::internal::SchurComplementSolverOptions<double> solver_options;
                     solver_options.linearBackend = solver_backend;
                     solver_options.deviceIndex = options.plaMatrixDevice;
                     solver_options.maxIterations =
-                        (solver_backend == plamatrix::SchurComplementLinearBackend::Cpu ||
-                         solver_backend == plamatrix::SchurComplementLinearBackend::DenseCpu ||
-                         solver_backend == plamatrix::SchurComplementLinearBackend::SparseCpu)
+                        (solver_backend == plamatrix::internal::SchurComplementLinearBackend::Cpu ||
+                         solver_backend == plamatrix::internal::SchurComplementLinearBackend::DenseCpu ||
+                         solver_backend == plamatrix::internal::SchurComplementLinearBackend::SparseCpu)
                             ? std::max(50, active.primaryBlockCount * 12)
                             : std::max(200, active.primaryBlockCount * 30);
                     solver_options.relativeTolerance = 1.0e-12;
@@ -306,23 +322,31 @@ namespace plabundle::internal
                     solver_options.preconditionerClusterSize = options.plaMatrixPreconditionerClusterSize;
                     solver_options.useInitialGuess = !use_reference_online_schur && !retry_primary_step.empty();
                     solver_options.useMixedPrecision =
-                        options.enablePlaMatrixMixedPrecision &&
-                        solver_backend == plamatrix::SchurComplementLinearBackend::Cuda &&
-                        active.primaryBlockCount >= 50;
-                    primary_step = use_reference_online_schur ? std::vector<double>{} : retry_primary_step;
+                        solver_backend == plamatrix::internal::SchurComplementLinearBackend::Vulkan ||
+                        (options.enablePlaMatrixMixedPrecision &&
+                         solver_backend == plamatrix::internal::SchurComplementLinearBackend::Cuda &&
+                         active.primaryBlockCount >= 50);
+                    if (use_reference_online_schur || retry_primary_step.empty())
+                    {
+                        primary_step.clear();
+                    }
+                    else
+                    {
+                        primary_step = retry_primary_step;
+                    }
                     eliminated_step.clear();
                     const auto& equations = use_reference_online_schur ? reference_schur_workspace.reducedEquations
                                                                        : assembly_workspace.equations;
-                    plamatrix::SchurComplementSolverReport<double> solver_report;
+                    plamatrix::internal::SchurComplementSolverReport<double> solver_report;
                     try
                     {
                         solver_report =
-                            plamatrix::solveDampedSchurComplement(equations,
-                                                                  use_reference_online_schur ? 0.0 : damping,
-                                                                  solver_options,
-                                                                  solver_workspace,
-                                                                  &primary_step,
-                                                                  &eliminated_step);
+                            plamatrix::internal::solveDampedSchurComplement(equations,
+                                                                            use_reference_online_schur ? 0.0 : damping,
+                                                                            solver_options,
+                                                                            solver_workspace,
+                                                                            &primary_step,
+                                                                            &eliminated_step);
                     }
                     catch (const std::exception& error)
                     {
@@ -340,7 +364,7 @@ namespace plabundle::internal
                     {
                         result.plaMatrixPreconditionerName = solver_report.preconditionerName;
                     }
-                    if (solver_backend != plamatrix::SchurComplementLinearBackend::Cpu)
+                    if (solver_backend != plamatrix::internal::SchurComplementLinearBackend::Cpu)
                     {
                         if (solver_report.schurPatternReused)
                         {
@@ -397,6 +421,7 @@ namespace plabundle::internal
                                                                      damping,
                                                                      primary_step,
                                                                      reference_schur_workspace.directPrimaryRhs,
+                                                                     &reference_schur_workspace,
                                                                      &eliminated_step);
                         result.plaMatrixBackSubstitutionSeconds +=
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - back_substitution_start)
@@ -443,8 +468,8 @@ namespace plabundle::internal
                         candidate_state = state;
                         plamatrix_ba::applyStep(
                             active, primary_step, eliminated_step, &candidate_state, options, derivative_step);
-                        const double derivative_cost = plamatrix_ba::evaluateObjective(
-                            cameras, tracks, options, active, candidate_state, stage_iteration);
+                        const double derivative_cost = evaluateCandidateObjective(
+                            cameras, tracks, options, active, candidate_state, stage_iteration, &assembly_workspace);
                         ++result.plaMatrixObjectiveEvaluations;
                         if (std::isfinite(derivative_cost) && derivative_cost < current_cost)
                         {
@@ -462,8 +487,8 @@ namespace plabundle::internal
                         result.plaMatrixTrialStateSeconds +=
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - trial_state_start).count();
                         const auto objective_start = std::chrono::steady_clock::now();
-                        candidate_cost = plamatrix_ba::evaluateObjective(
-                            cameras, tracks, options, active, candidate_state, stage_iteration);
+                        candidate_cost = evaluateCandidateObjective(
+                            cameras, tracks, options, active, candidate_state, stage_iteration, &assembly_workspace);
                         result.plaMatrixObjectiveSeconds +=
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - objective_start).count();
                         ++result.plaMatrixObjectiveEvaluations;
@@ -538,6 +563,7 @@ namespace plabundle::internal
         if (cancelled)
         {
             result.refinedCameras = cameras;
+            result.refinedRig = options.rig;
             for (std::size_t index = 0; index < tracks.size(); ++index)
             {
                 result.points[index].point = tracks[index].initialPoint;
@@ -564,6 +590,7 @@ namespace plabundle::internal
             result.backendMessage += "；稠密 Schur 回退原因：" + result.plaMatrixDenseFallbackMessage;
         }
         result.refinedCameras = state.cameras;
+        result.refinedRig = state.rig;
         result.referenceCommittedIntrinsicParameterMask =
             plamatrix_ba::committedReferenceIntrinsicParameters(options, active, state, current_cost);
         plamatrix_ba::publishIntrinsics(

@@ -1,6 +1,6 @@
 #include "BundleAdjustPlaMatrixProblem.h"
 
-#include <plamatrix/ops/statistics.h>
+#include <plamatrix/internal/ops/statistics.h>
 
 #include <algorithm>
 #include <cmath>
@@ -19,45 +19,46 @@ namespace plabundle::internal::plamatrix_ba
 
         double medianOr(std::vector<double> values, double fallback)
         {
-            return plamatrix::finiteMedian(std::move(values)).value_or(fallback);
+            return plamatrix::internal::finiteMedian(std::move(values)).value_or(fallback);
         }
 
         struct GroupSamples
         {
-            std::array<std::vector<double>, 9> initial;
-            std::array<std::vector<double>, 9> reference;
+            std::array<std::vector<double>, kBAIntrinsicParameterCount> initial;
+            std::array<std::vector<double>, kBAIntrinsicParameterCount> reference;
             std::vector<double> imageWidths;
             std::vector<double> imageHeights;
+            CameraParameterMask supported;
+
+            GroupSamples()
+            {
+                supported.fill(true);
+            }
         };
 
         void appendSamples(const CameraState& camera, const CameraState& reference, GroupSamples* samples)
         {
             const auto intrinsics = camera.intrinsics();
             const auto reference_intrinsics = reference.intrinsics();
-            const auto distortion = camera.distortion();
-            const auto reference_distortion = reference.distortion();
-            samples->initial[0].push_back(intrinsics.focalX);
-            samples->reference[0].push_back(reference_intrinsics.focalX);
-            samples->initial[1].push_back(intrinsics.focalY / intrinsics.focalX);
-            samples->reference[1].push_back(reference_intrinsics.focalY / reference_intrinsics.focalX);
+            const auto parameters = camera.parameterBlock();
+            const auto reference_parameters = reference.parameterBlock();
+            const auto supported = camera.supportedParameters();
+            samples->initial[0].push_back(parameters[0]);
+            samples->reference[0].push_back(reference_parameters[0]);
+            samples->initial[1].push_back(std::exp(parameters[1]));
+            samples->reference[1].push_back(std::exp(reference_parameters[1]));
             samples->initial[2].push_back(intrinsics.principalX - reference_intrinsics.principalX);
             samples->initial[3].push_back(intrinsics.principalY - reference_intrinsics.principalY);
             samples->reference[2].push_back(0.0);
             samples->reference[3].push_back(0.0);
-            const std::array<double, 5> initial_distortion{{distortion.radialK1,
-                                                            distortion.radialK2,
-                                                            distortion.radialK3,
-                                                            distortion.tangentialP1,
-                                                            distortion.tangentialP2}};
-            const std::array<double, 5> reference_values{{reference_distortion.radialK1,
-                                                          reference_distortion.radialK2,
-                                                          reference_distortion.radialK3,
-                                                          reference_distortion.tangentialP1,
-                                                          reference_distortion.tangentialP2}};
-            for (std::size_t index = 0; index < initial_distortion.size(); ++index)
+            for (std::size_t index = 4; index < parameters.size(); ++index)
             {
-                samples->initial[index + 4].push_back(initial_distortion[index]);
-                samples->reference[index + 4].push_back(reference_values[index]);
+                samples->initial[index].push_back(parameters[index]);
+                samples->reference[index].push_back(reference_parameters[index]);
+            }
+            for (std::size_t index = 0; index < supported.size(); ++index)
+            {
+                samples->supported[index] = samples->supported[index] && supported[index];
             }
             const auto image_size = reference.imageSize().has_value() ? reference.imageSize() : camera.imageSize();
             samples->imageWidths.push_back(image_size.has_value() ? static_cast<double>(image_size->samples)
@@ -105,10 +106,11 @@ namespace plabundle::internal::plamatrix_ba
             auto& group = groups[group_index];
             group.lower.fill(-std::numeric_limits<double>::infinity());
             group.upper.fill(std::numeric_limits<double>::infinity());
-            for (std::size_t parameter = 0; parameter < 9; ++parameter)
+            for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
             {
                 group.enabled[parameter] =
-                    sharedIntrinsicParameterEnabled(options, static_cast<BAIntrinsicParameter>(parameter));
+                    sharedIntrinsicParameterEnabled(options, static_cast<BAIntrinsicParameter>(parameter)) &&
+                    samples[group_index].supported[parameter];
             }
             group.focalReference = medianOr(samples[group_index].reference[0], 1.0);
             group.aspectReference = medianOr(samples[group_index].reference[1], 1.0);
@@ -117,7 +119,7 @@ namespace plabundle::internal::plamatrix_ba
                 std::log(std::max(1e-12, medianOr(samples[group_index].initial[1], group.aspectReference)));
             group.prior[0] = group.focalReference;
             group.prior[1] = std::log(group.aspectReference);
-            for (std::size_t parameter = 2; parameter < 9; ++parameter)
+            for (std::size_t parameter = 2; parameter < kBAIntrinsicParameterCount; ++parameter)
             {
                 group.prior[parameter] = medianOr(samples[group_index].reference[parameter], 0.0);
                 group.parameters[parameter] = medianOr(samples[group_index].initial[parameter], group.prior[parameter]);
@@ -130,11 +132,15 @@ namespace plabundle::internal::plamatrix_ba
             const double principal_limit = group.focalReference * options.maxSharedPrincipalPointOffsetFraction;
             group.lower[2] = group.lower[3] = -principal_limit;
             group.upper[2] = group.upper[3] = principal_limit;
-            const std::array<double, 5> distortion_limits{{options.maxSharedRadialK1Abs * low_order_scale,
+            const std::array<double, 9> distortion_limits{{options.maxSharedRadialK1Abs * low_order_scale,
                                                            options.maxSharedRadialK2Abs,
                                                            options.maxSharedRadialK3Abs,
                                                            options.maxSharedTangentialP1Abs * low_order_scale,
-                                                           options.maxSharedTangentialP2Abs * low_order_scale}};
+                                                           options.maxSharedTangentialP2Abs * low_order_scale,
+                                                           group.focalReference * options.maxSharedSkewFraction,
+                                                           options.maxSharedRadialK4Abs,
+                                                           options.maxSharedTangentialP3Abs,
+                                                           options.maxSharedTangentialP4Abs}};
             for (std::size_t index = 0; index < distortion_limits.size(); ++index)
             {
                 group.lower[index + 4] = -distortion_limits[index];
@@ -143,16 +149,21 @@ namespace plabundle::internal::plamatrix_ba
 
             const double principal_sigma =
                 std::max(1e-6, group.focalReference * options.sharedPrincipalPointPriorSigmaFraction);
-            const std::array<double, 9> sigma{{options.sharedFocalPriorSigma * group.focalReference,
-                                               options.sharedFocalAspectPriorSigma,
-                                               principal_sigma,
-                                               principal_sigma,
-                                               options.sharedRadialK1PriorSigma * low_order_scale,
-                                               options.sharedRadialK2PriorSigma,
-                                               options.sharedRadialK3PriorSigma,
-                                               options.sharedTangentialP1PriorSigma * low_order_scale,
-                                               options.sharedTangentialP2PriorSigma * low_order_scale}};
-            for (std::size_t parameter = 0; parameter < 9; ++parameter)
+            const std::array<double, kBAIntrinsicParameterCount> sigma{
+                {options.sharedFocalPriorSigma * group.focalReference,
+                 options.sharedFocalAspectPriorSigma,
+                 principal_sigma,
+                 principal_sigma,
+                 options.sharedRadialK1PriorSigma * low_order_scale,
+                 options.sharedRadialK2PriorSigma,
+                 options.sharedRadialK3PriorSigma,
+                 options.sharedTangentialP1PriorSigma * low_order_scale,
+                 options.sharedTangentialP2PriorSigma * low_order_scale,
+                 group.focalReference * options.sharedSkewPriorSigmaFraction,
+                 options.sharedRadialK4PriorSigma,
+                 options.sharedTangentialP3PriorSigma,
+                 options.sharedTangentialP4PriorSigma}};
+            for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
             {
                 group.parameters[parameter] =
                     std::clamp(group.parameters[parameter], group.lower[parameter], group.upper[parameter]);
@@ -163,7 +174,8 @@ namespace plabundle::internal::plamatrix_ba
             {
                 group.usesReferenceTransitionPrior = true;
                 // 参考模型没有独立的像素宽高比参数；该扩展继续沿用原弱先验。
-                constexpr std::array<std::size_t, 8> supported_parameters{{0, 2, 3, 4, 5, 6, 7, 8}};
+                constexpr std::array<std::size_t, kBAIntrinsicParameterCount - 1> supported_parameters{
+                    {0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}};
                 for (const std::size_t parameter : supported_parameters)
                 {
                     group.inverseSigma[parameter] = 0.0;
@@ -187,15 +199,21 @@ namespace plabundle::internal::plamatrix_ba
                     const double radius3 = radius2 * radius;
                     const double radius5 = radius3 * radius2;
                     const double radius7 = radius5 * radius2;
-                    const std::array<double, 9> base_sigma{{1.0 / radius,
-                                                            0.0,
-                                                            1.0,
-                                                            1.0,
-                                                            1.0 / (radius3 * group.focalReference),
-                                                            1.0 / (radius5 * group.focalReference),
-                                                            1.0 / (radius7 * group.focalReference),
-                                                            1.0 / (radius2 * group.focalReference),
-                                                            1.0 / (radius2 * group.focalReference)}};
+                    const double radius9 = radius7 * radius2;
+                    const std::array<double, kBAIntrinsicParameterCount> base_sigma{
+                        {1.0 / radius,
+                         0.0,
+                         1.0,
+                         1.0,
+                         1.0 / (radius3 * group.focalReference),
+                         1.0 / (radius5 * group.focalReference),
+                         1.0 / (radius7 * group.focalReference),
+                         1.0 / (radius2 * group.focalReference),
+                         1.0 / (radius2 * group.focalReference),
+                         1.0 / radius,
+                         1.0 / (radius9 * group.focalReference),
+                         1.0,
+                         1.0}};
                     for (const std::size_t parameter : supported_parameters)
                     {
                         if (!group.enabled[parameter])
@@ -235,7 +253,7 @@ namespace plabundle::internal::plamatrix_ba
         {
             auto& group = (*groups)[group_index];
             const int block = active.cameraBlockCount + static_cast<int>(group_index);
-            for (std::size_t parameter = 0; parameter < 9; ++parameter)
+            for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
             {
                 if (!group.enabled[parameter])
                 {
@@ -265,12 +283,14 @@ namespace plabundle::internal::plamatrix_ba
             options.sharedIntrinsicReferenceCameras.empty() ? input_cameras : options.sharedIntrinsicReferenceCameras;
         double focal_scale_sum = 0.0;
         double aspect_scale_sum = 0.0;
-        std::array<double, 7> remaining_sums{};
+        std::array<double, 2 + kBAIntrinsicParameterCount - 4> remaining_sums{};
         for (std::size_t camera_index = 0; camera_index < result->refinedCameras.size(); ++camera_index)
         {
             auto& camera = result->refinedCameras[camera_index];
             const auto source = input_cameras[camera_index].intrinsics();
             const auto reference = references[camera_index].intrinsics();
+            const auto source_parameters = input_cameras[camera_index].parameterBlock();
+            auto published_parameters = source_parameters;
             const auto& group = groups[static_cast<std::size_t>(active.calibrationGroupByCamera[camera_index])];
             const auto publishes = [&](std::size_t parameter) {
                 return group.enabled[parameter] &&
@@ -281,40 +301,34 @@ namespace plabundle::internal::plamatrix_ba
             const double aspect = publishes(1) ? std::exp(group.parameters[1]) : source_aspect;
             const double principal_x = publishes(2) ? reference.principalX + group.parameters[2] : source.principalX;
             const double principal_y = publishes(3) ? reference.principalY + group.parameters[3] : source.principalY;
-            camera.setIntrinsics(focal, focal * aspect, principal_x, principal_y);
-            const auto source_distortion = input_cameras[camera_index].distortion();
-            auto distortion = source_distortion;
-            double* distortion_values[5] = {&distortion.radialK1,
-                                            &distortion.radialK2,
-                                            &distortion.radialK3,
-                                            &distortion.tangentialP1,
-                                            &distortion.tangentialP2};
-            for (std::size_t index = 0; index < 5; ++index)
+            published_parameters[0] = focal;
+            published_parameters[1] = std::log(aspect);
+            published_parameters[2] = principal_x;
+            published_parameters[3] = principal_y;
+            for (std::size_t index = 4; index < published_parameters.size(); ++index)
             {
-                if (publishes(index + 4))
+                if (publishes(index))
                 {
-                    *distortion_values[index] = group.parameters[index + 4];
+                    published_parameters[index] = group.parameters[index];
                 }
             }
-            camera.setDistortion(distortion);
+            const CameraParameterMask supported = camera.supportedParameters();
+            (void)camera.setParameterBlock(published_parameters, supported);
             focal_scale_sum += focal / group.focalReference;
             aspect_scale_sum += aspect / group.aspectReference;
             remaining_sums[0] += principal_x - reference.principalX;
             remaining_sums[1] += principal_y - reference.principalY;
-            remaining_sums[2] += distortion.radialK1;
-            remaining_sums[3] += distortion.radialK2;
-            remaining_sums[4] += distortion.radialK3;
-            remaining_sums[5] += distortion.tangentialP1;
-            remaining_sums[6] += distortion.tangentialP2;
-            const bool changed =
-                std::abs(focal - source.focalX) > 1e-8 * std::max(1.0, std::abs(source.focalX)) ||
-                std::abs(focal * aspect - source.focalY) > 1e-8 * std::max(1.0, std::abs(source.focalY)) ||
-                std::abs(principal_x - source.principalX) > 1e-8 || std::abs(principal_y - source.principalY) > 1e-8 ||
-                std::abs(distortion.radialK1 - source_distortion.radialK1) > 1e-10 ||
-                std::abs(distortion.radialK2 - source_distortion.radialK2) > 1e-10 ||
-                std::abs(distortion.radialK3 - source_distortion.radialK3) > 1e-10 ||
-                std::abs(distortion.tangentialP1 - source_distortion.tangentialP1) > 1e-10 ||
-                std::abs(distortion.tangentialP2 - source_distortion.tangentialP2) > 1e-10;
+            for (std::size_t index = 0; index < remaining_sums.size() - 2; ++index)
+            {
+                remaining_sums[index + 2] += published_parameters[index + 4];
+            }
+            bool changed = false;
+            for (std::size_t index = 0; index < source_parameters.size(); ++index)
+            {
+                const double tolerance =
+                    index < 2 ? 1.0e-8 * std::max(1.0, std::abs(source_parameters[index])) : 1.0e-10;
+                changed = changed || std::abs(published_parameters[index] - source_parameters[index]) > tolerance;
+            }
             if (changed)
             {
                 ++result->refinedIntrinsicCount;
@@ -331,6 +345,10 @@ namespace plabundle::internal::plamatrix_ba
         result->refinedSharedRadialK3 = remaining_sums[4] / count;
         result->refinedSharedTangentialP1 = remaining_sums[5] / count;
         result->refinedSharedTangentialP2 = remaining_sums[6] / count;
+        result->refinedSharedSkewB2 = remaining_sums[7] / count;
+        result->refinedSharedRadialK4 = remaining_sums[8] / count;
+        result->refinedSharedTangentialP3 = remaining_sums[9] / count;
+        result->refinedSharedTangentialP4 = remaining_sums[10] / count;
     }
 
 } // namespace plabundle::internal::plamatrix_ba

@@ -43,7 +43,10 @@ namespace plabundle::internal
                 _camera.distortion.k2,
                 _camera.distortion.k3,
                 _camera.distortion.p1,
-                _camera.distortion.p2};
+                _camera.distortion.p2,
+                _camera.distortion.k4,
+                _camera.distortion.p3,
+                _camera.distortion.p4};
     }
 
     std::array<double, 9> CameraState::cameraToWorldRotation() const noexcept
@@ -91,6 +94,21 @@ namespace plabundle::internal
         return _camera.depthAxisFlipped;
     }
 
+    FrameProjectionModel CameraState::projectionModel() const noexcept
+    {
+        return _camera.projectionModel;
+    }
+
+    CameraParameterBlock CameraState::parameterBlock() const noexcept
+    {
+        return cameraParameterBlock(_camera);
+    }
+
+    CameraParameterMask CameraState::supportedParameters() const noexcept
+    {
+        return supportedCameraParameters(_camera);
+    }
+
     bool CameraState::projectWorldPoint(const double world[3], double pixel[2]) const noexcept
     {
         if (!world || !pixel)
@@ -109,12 +127,20 @@ namespace plabundle::internal
 
     bool CameraState::projectWorldPointWithDepth(const double world[3], double pixel[2], double& depth) const noexcept
     {
+        return projectWorldPointWithDepthAtLine(world, _camera.rollingShutter.referenceLinePixels, pixel, depth);
+    }
+
+    bool CameraState::projectWorldPointWithDepthAtLine(const double world[3],
+                                                       double linePixels,
+                                                       double pixel[2],
+                                                       double& depth) const noexcept
+    {
         if (!world || !pixel)
         {
             return false;
         }
         Projection projection;
-        if (!plabundle::projectWorldPoint(_camera, {world[0], world[1], world[2]}, &projection))
+        if (!plabundle::projectWorldPointAtLine(_camera, {world[0], world[1], world[2]}, linePixels, &projection))
         {
             return false;
         }
@@ -126,11 +152,18 @@ namespace plabundle::internal
 
     void CameraState::worldToCamera(const double world[3], double cameraPoint[3]) const noexcept
     {
+        worldToCameraAtLine(world, _camera.rollingShutter.referenceLinePixels, cameraPoint);
+    }
+
+    void
+    CameraState::worldToCameraAtLine(const double world[3], double linePixels, double cameraPoint[3]) const noexcept
+    {
         if (!world || !cameraPoint)
         {
             return;
         }
-        const std::array<double, 3> transformed = worldToCameraPoint(_camera, {world[0], world[1], world[2]});
+        const std::array<double, 3> transformed =
+            worldToCameraPointAtLine(_camera, {world[0], world[1], world[2]}, linePixels);
         cameraPoint[0] = transformed[0];
         cameraPoint[1] = transformed[1];
         cameraPoint[2] = transformed[2];
@@ -168,16 +201,26 @@ namespace plabundle::internal
 
     void CameraState::setDistortion(const Distortion& distortion) noexcept
     {
-        setDistortion(distortion.radialK1,
-                      distortion.radialK2,
-                      distortion.radialK3,
-                      distortion.tangentialP1,
-                      distortion.tangentialP2);
+        _camera.distortion = {distortion.radialK1,
+                              distortion.radialK2,
+                              distortion.radialK3,
+                              distortion.tangentialP1,
+                              distortion.tangentialP2,
+                              distortion.radialK4,
+                              distortion.tangentialP3,
+                              distortion.tangentialP4};
     }
 
     void CameraState::setDistortion(double k1, double k2, double k3, double p1, double p2) noexcept
     {
         _camera.distortion = {k1, k2, k3, p1, p2};
+    }
+
+    bool CameraState::setParameterBlock(const CameraParameterBlock& parameters,
+                                        const CameraParameterMask& mask,
+                                        std::string* error) noexcept
+    {
+        return applyCameraParameterBlock(&_camera, parameters, mask, error);
     }
 
     void CameraState::applyDeltaPose(const double delta[6]) noexcept

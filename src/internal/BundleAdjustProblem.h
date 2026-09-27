@@ -18,13 +18,9 @@ namespace plabundle::internal
     using BAScaleBarConstraint = ScaleBarConstraint;
     using BATrack = Track;
 
-    struct BACameraPosePrior
+    struct BACameraPosePrior : CameraPosePrior
     {
         bool enabled = false;
-        std::array<double, 9> cameraToWorldRotation{{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0}};
-        std::array<double, 3> cameraCenter{{0.0, 0.0, 0.0}};
-        double positionSigmaMeters = 1.0;
-        double rotationSigmaDegrees = 2.0;
     };
 
     struct BACameraPlaneConstraint

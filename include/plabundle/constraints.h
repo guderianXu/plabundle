@@ -7,6 +7,26 @@
 namespace plabundle
 {
 
+    enum class PosePriorComponents
+    {
+        Position,
+        Rotation,
+        RotationAndPosition,
+    };
+
+    enum class PosePriorUncertainty
+    {
+        IndependentSigmas,
+        Covariance,
+        SqrtInformation,
+    };
+
+    enum class PosePriorTangentFrame
+    {
+        World,
+        PriorCamera,
+    };
+
     struct Observation
     {
         int cameraIndex = -1;
@@ -56,7 +76,19 @@ namespace plabundle
         double sigmaMeters = 1.0;
         double weight = 1.0;
         int sourceIndex = -1;
+        enum class Uncertainty
+        {
+            IsotropicSigma,
+            Covariance,
+            SqrtInformation,
+        } uncertainty = Uncertainty::IsotropicSigma;
+        // Row-major 3x3 covariance (m^2) or square-root information (m^-1) in the solver frame.
+        std::array<double, 9> uncertaintyMatrix{};
     };
+
+    using ControlPointUncertainty = ControlPointConstraint::Uncertainty;
+
+    bool validateControlPointConstraint(const ControlPointConstraint& constraint, std::string* error = nullptr);
 
     struct ScaleBarConstraint
     {
@@ -74,7 +106,14 @@ namespace plabundle
         std::array<double, 3> cameraCenter{{0.0, 0.0, 0.0}};
         double positionSigmaMeters = 1.0;
         double rotationSigmaDegrees = 2.0;
+        PosePriorComponents components = PosePriorComponents::RotationAndPosition;
+        PosePriorUncertainty uncertainty = PosePriorUncertainty::IndependentSigmas;
+        PosePriorTangentFrame tangentFrame = PosePriorTangentFrame::World;
+        // Row-major 6x6 in [rotation radians, position meters] order.
+        std::array<double, 36> uncertaintyMatrix{};
     };
+
+    bool validateCameraPosePrior(const CameraPosePrior& prior, std::string* error = nullptr);
 
     struct CameraPlaneConstraint
     {

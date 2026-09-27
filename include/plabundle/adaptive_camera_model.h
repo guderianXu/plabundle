@@ -46,7 +46,9 @@ namespace plabundle
     int enabledIntrinsicParameterCount(const IntrinsicParameterMask& mask) noexcept;
     std::string adaptiveCameraModelName(const IntrinsicParameterMask& mask);
     AdaptiveCameraModelAssessment assessAdaptiveCameraModel(const Problem& problem, const Options* options = nullptr);
+    AdaptiveCameraModelAssessment assessAdaptiveCameraModel(const Problem& problem, const SolveOptions& options);
     bool applyAdaptiveCameraModel(const AdaptiveCameraModelAssessment& assessment, Options* options);
+    bool applyAdaptiveCameraModel(const AdaptiveCameraModelAssessment& assessment, SolveOptions* options);
     bool restoreInactiveAdaptiveIntrinsics(std::vector<FrameCamera>* cameras,
                                            const std::vector<FrameCamera>& stableReferences,
                                            const IntrinsicParameterMask& activeMask);

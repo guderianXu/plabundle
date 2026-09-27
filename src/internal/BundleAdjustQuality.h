@@ -50,8 +50,8 @@ namespace plabundle::internal
      * @brief 检查一类物方约束的 RMS 是否在质量门控允许范围内。
      *
      * 约束数量为零时直接通过；否则前后 RMS 必须有限，且优化后 RMS 不得超过
-     * `max(1, maxGrowth) * rmsBefore`。若优化前近似为零，则优化后也必须保持近零，
-     * 避免纯重投影目标破坏已经精确满足的控制约束。
+     * `max(1, maxGrowth) * max(rmsBefore, rmsUncertainty)`。不确定度形成物理噪声底，
+     * 避免把从精确初值移动到测量容差内的合法联合优化误判为劣化。
      *
      * @param constraintName 写入失败诊断的约束名称，可为空。
      * @param message 可选失败原因输出；通过时不改写。
@@ -60,6 +60,7 @@ namespace plabundle::internal
                                         double rmsBefore,
                                         double rmsAfter,
                                         double maxGrowth,
+                                        double rmsUncertainty,
                                         const char* constraintName,
                                         std::string* message);
 

@@ -12,8 +12,8 @@ namespace plabundle::internal::plamatrix_ba
     {
         int residualSize = 0;
         std::array<double, 6> residual{};
-        std::array<double, 54> primaryJacobian{};
-        std::array<double, 54> secondaryPrimaryJacobian{};
+        std::array<double, 6 * kBAIntrinsicParameterCount> primaryJacobian{};
+        std::array<double, 6 * kBAIntrinsicParameterCount> secondaryPrimaryJacobian{};
         std::array<double, 18> pointJacobian{};
         double normalWeight = 1.0;
         double robustCost = 0.0;

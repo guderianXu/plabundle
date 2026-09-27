@@ -6,12 +6,27 @@
 namespace plabundle::internal::plamatrix_ba::assembly_detail
 {
 
-    struct ObservationPrimaryTerms
+    struct CameraPosePrimaryTerms
     {
         std::array<plamatrix::Index, 2> blocks{};
-        std::array<std::array<double, 18>, 2> jacobians{};
+        std::array<std::array<double, 6 * kPrimaryBlockSize>, 2> jacobians{};
         std::size_t count = 0;
     };
+
+    struct ObservationPrimaryTerms
+    {
+        std::array<plamatrix::Index, 3> blocks{};
+        std::array<std::array<double, 2 * kPrimaryBlockSize>, 3> jacobians{};
+        std::size_t count = 0;
+    };
+
+    CameraPosePrimaryTerms cameraPosePrimaryTerms(const BAOptions& options,
+                                                  const ActiveProblem& active,
+                                                  const OptimizationState& state,
+                                                  std::size_t camera_index,
+                                                  const double* camera_jacobian,
+                                                  int residual_size,
+                                                  int row_stride);
 
     ObservationPrimaryTerms observationPrimaryTerms(const BAOptions& options,
                                                     const ActiveProblem& active,
@@ -19,7 +34,7 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                                                     std::size_t camera_index,
                                                     const ObservationLinearization& linearization);
 
-    void addPointResidual(plamatrix::BlockNormalEquations<double>* equations,
+    void addPointResidual(plamatrix::internal::BlockNormalEquations<double>* equations,
                           int primary_block,
                           int eliminated_block,
                           const double* point_jacobian,
@@ -27,7 +42,7 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                           int residual_size,
                           double weight);
 
-    void addObservation(plamatrix::BlockNormalEquations<double>* equations,
+    void addObservation(plamatrix::internal::BlockNormalEquations<double>* equations,
                         const BAOptions& options,
                         const ActiveProblem& active,
                         const OptimizationState& state,
@@ -51,6 +66,6 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                                    const ActiveProblem& active,
                                    const OptimizationState& state,
                                    int iteration,
-                                   plamatrix::BlockNormalEquations<double>* equations);
+                                   plamatrix::internal::BlockNormalEquations<double>* equations);
 
 } // namespace plabundle::internal::plamatrix_ba::assembly_detail

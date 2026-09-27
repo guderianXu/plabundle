@@ -2,5 +2,5 @@
 
 int plabundlePublicHeaderConstraints()
 {
-    return plabundle::Observation{}.cameraIndex;
+    return plabundle::Observation{}.cameraIndex + static_cast<int>(plabundle::ControlPointUncertainty::SqrtInformation);
 }

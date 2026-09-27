@@ -21,9 +21,9 @@ int main()
     plabundle::Problem problem;
     problem.cameras = {left, right};
     problem.tracks = {track};
-    plabundle::Options options;
-    options.refineCameraPose = false;
-    options.enablePointFilter = false;
+    plabundle::SolveOptions options;
+    options.calibration.refineCameraPose = false;
+    options.solver.enablePointFilter = false;
     const plabundle::Result result = plabundle::Solver().solve(problem, options);
     if (!result.usable())
     {

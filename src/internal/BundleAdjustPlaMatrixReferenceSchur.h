@@ -2,19 +2,36 @@
 
 #include "BundleAdjustPlaMatrixAssembly.h"
 
-#include <plamatrix/optimization/block_schur.h>
+#include <plamatrix/internal/optimization/block_schur.h>
 
+#include <array>
 #include <exception>
 #include <utility>
+#include <vector>
 
 namespace plabundle::internal::plamatrix_ba
 {
+
+    using ReferenceSchurCrossBlock = std::array<double, kPrimaryBlockSize * kEliminatedBlockSize>;
+
+    struct ReferenceSchurPointWorkspace
+    {
+        std::array<double, 9> hessian{};
+        std::array<double, 3> rhs{};
+        std::vector<plamatrix::Index> primaryBlocks;
+        std::vector<ReferenceSchurCrossBlock> crossBlocks;
+        std::vector<ReferenceSchurCrossBlock> reducedCrossBlocks;
+        std::vector<std::array<char, kPrimaryBlockSize>> activeRows;
+
+        void clear() noexcept;
+        ReferenceSchurCrossBlock& crossBlock(plamatrix::Index block);
+    };
 
     struct ReferenceSchurWorkspace
     {
         explicit ReferenceSchurWorkspace(const ActiveProblem& active);
 
-        plamatrix::BlockNormalEquations<double> reducedEquations;
+        plamatrix::internal::BlockNormalEquations<double> reducedEquations;
         std::vector<std::vector<double>> partialDiagonals;
         std::vector<std::vector<double>> partialDirectRhs;
         std::vector<std::vector<double>> partialSchurRhs;
@@ -26,6 +43,9 @@ namespace plabundle::internal::plamatrix_ba
         std::vector<char> partialPointSystemSingular;
         std::vector<std::exception_ptr> errors;
         std::vector<std::size_t> trackBoundaries;
+        std::vector<ReferenceSchurPointWorkspace> pointWorkspaces;
+        std::vector<double> partialDirectionalDecrease;
+        std::vector<char> partialBackSubstitutionSuccess;
         int partitionThreadCount = 0;
     };
 
@@ -61,6 +81,7 @@ namespace plabundle::internal::plamatrix_ba
                                                                     double damping,
                                                                     const std::vector<double>& primary_step,
                                                                     const std::vector<double>& direct_primary_rhs,
+                                                                    ReferenceSchurWorkspace* workspace,
                                                                     std::vector<double>* eliminated_step);
 
 } // namespace plabundle::internal::plamatrix_ba

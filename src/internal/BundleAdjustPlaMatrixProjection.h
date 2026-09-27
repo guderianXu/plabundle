@@ -20,11 +20,19 @@ namespace plabundle::internal::plamatrix_ba
         std::array<double, 2> residual{{0.0, 0.0}};
         std::array<double, 6> pointJacobian{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
         std::array<double, 12> cameraJacobian{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-        std::array<double, 18> intrinsicJacobian{
-            {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+        std::array<double, 2 * kBAIntrinsicParameterCount> intrinsicJacobian{};
         double normalWeight = 1.0;
         double robustCost = 0.0;
     };
+
+    struct ImageRobustLossEvaluation
+    {
+        double cost = 0.0;
+        double weight = 1.0;
+    };
+
+    ImageRobustLossEvaluation
+    evaluateImageRobustLoss(double squared_residual_norm, ImageRobustLoss loss, double scale_pixels);
 
     /**
      * @brief 按 FramePinholeNumericState 投影语义线性化单条观测。
@@ -36,21 +44,24 @@ namespace plabundle::internal::plamatrix_ba
     bool linearizeObservation(const CameraState& camera,
                               const std::array<double, 3>& point,
                               const BAObservation& observation,
-                              double huber_delta,
+                              ImageRobustLoss robust_loss,
+                              double robust_loss_scale_pixels,
                               ObservationLinearization* linearization,
                               bool whiten_by_measurement_scale = false,
                               bool use_reference_point_parameterization = false);
 
-    /// Linearize reprojection with the shared nine-parameter Brown-Conrady model.
-    bool linearizeObservationWithSharedIntrinsics(const CameraState& camera,
-                                                  const CameraState& reference_camera,
-                                                  const std::array<double, 9>& shared_intrinsics,
-                                                  const BAIntrinsicParameterMask& active_parameters,
-                                                  const std::array<double, 3>& point,
-                                                  const BAObservation& observation,
-                                                  double huber_delta,
-                                                  ObservationLinearization* linearization,
-                                                  bool whiten_by_measurement_scale = false,
-                                                  bool use_reference_point_parameterization = false);
+    /// Linearize reprojection with the shared complete frame-calibration model.
+    bool
+    linearizeObservationWithSharedIntrinsics(const CameraState& camera,
+                                             const CameraState& reference_camera,
+                                             const std::array<double, kBAIntrinsicParameterCount>& shared_intrinsics,
+                                             const BAIntrinsicParameterMask& active_parameters,
+                                             const std::array<double, 3>& point,
+                                             const BAObservation& observation,
+                                             ImageRobustLoss robust_loss,
+                                             double robust_loss_scale_pixels,
+                                             ObservationLinearization* linearization,
+                                             bool whiten_by_measurement_scale = false,
+                                             bool use_reference_point_parameterization = false);
 
 } // namespace plabundle::internal::plamatrix_ba

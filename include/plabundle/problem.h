@@ -2,6 +2,7 @@
 
 #include <plabundle/camera.h>
 #include <plabundle/constraints.h>
+#include <plabundle/rig.h>
 
 #include <optional>
 #include <string>
@@ -38,12 +39,16 @@ namespace plabundle
         std::vector<Track> tracks;
         std::vector<int> fixedCameraIndices;
         std::vector<int> fixedTrackIndices;
+        // Cameras with the same id share one intrinsic/model parameter block.
+        // Unique ids give each camera an independent block; disabling all
+        // intrinsic parameters keeps calibration fixed.
         std::vector<int> cameraCalibrationGroupIds;
         std::vector<FrameCamera> sharedIntrinsicReferenceCameras;
         std::vector<LaserRangeConstraint> laserRangeConstraints;
         std::vector<ScaleBarConstraint> scaleBarConstraints;
         std::vector<std::optional<CameraPosePrior>> cameraPosePriors;
         std::optional<CameraPlaneConstraint> cameraPlaneConstraint;
+        RigTopology rig;
         Gauge gauge;
     };
 

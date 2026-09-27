@@ -57,14 +57,14 @@ namespace plabundle
 
         bool validPosePrior(const CameraPosePrior& prior) noexcept
         {
-            FrameCamera camera;
-            camera.cameraToWorldRotation = prior.cameraToWorldRotation;
-            camera.cameraCenter = prior.cameraCenter;
-            camera.focalXPixels = 1.0;
-            camera.focalYPixels = 1.0;
-            return validateFrameCamera(camera) && finite(prior.positionSigmaMeters) &&
-                   prior.positionSigmaMeters > 0.0 && finite(prior.rotationSigmaDegrees) &&
-                   prior.rotationSigmaDegrees > 0.0;
+            try
+            {
+                return validateCameraPosePrior(prior);
+            }
+            catch (...)
+            {
+                return false;
+            }
         }
 
         bool usableSqrtInformation(const std::array<double, 9>& matrix) noexcept
@@ -95,6 +95,12 @@ namespace plabundle
             const double dy = left[1] - right[1];
             const double dz = left[2] - right[2];
             return dx * dx + dy * dy + dz * dz;
+        }
+
+        bool sameCalibrationFamily(const FrameCamera& left, const FrameCamera& right) noexcept
+        {
+            return left.projectionModel == right.projectionModel &&
+                   left.brownTangentialConvention == right.brownTangentialConvention;
         }
 
     } // namespace
@@ -150,10 +156,15 @@ namespace plabundle
             setError(error, "problem requires at least one track");
             return false;
         }
-        for (std::size_t index = 0; index < problem.cameras.size(); ++index)
+        std::vector<FrameCamera> effective_cameras;
+        if (!composeRigCameras(problem.cameras, problem.rig, &effective_cameras, error))
+        {
+            return false;
+        }
+        for (std::size_t index = 0; index < effective_cameras.size(); ++index)
         {
             std::string camera_error;
-            if (!validateFrameCamera(problem.cameras[index], &camera_error))
+            if (!validateFrameCamera(effective_cameras[index], &camera_error))
             {
                 setError(error, "camera " + std::to_string(index) + " is invalid: " + camera_error);
                 return false;
@@ -184,15 +195,16 @@ namespace plabundle
             setError(error, "shared intrinsic reference cameras must be empty or aligned with cameras");
             return false;
         }
-        for (const FrameCamera& camera : problem.sharedIntrinsicReferenceCameras)
+        for (std::size_t index = 0; index < problem.sharedIntrinsicReferenceCameras.size(); ++index)
         {
-            if (!validateFrameCamera(camera))
+            const FrameCamera& camera = problem.sharedIntrinsicReferenceCameras[index];
+            if (!validateFrameCamera(camera) || !sameCalibrationFamily(camera, effective_cameras[index]))
             {
-                setError(error, "shared intrinsic reference camera is invalid");
+                setError(error,
+                         "shared intrinsic reference camera is invalid or uses a different projection/convention");
                 return false;
             }
         }
-
         for (std::size_t track_index = 0; track_index < problem.tracks.size(); ++track_index)
         {
             const Track& track = problem.tracks[track_index];
@@ -230,10 +242,10 @@ namespace plabundle
             }
             for (const ControlPointConstraint& constraint : track.controlPointConstraints)
             {
-                if (!finiteArray(constraint.point) || !finite(constraint.sigmaMeters) ||
-                    constraint.sigmaMeters <= 0.0 || !finite(constraint.weight) || constraint.weight <= 0.0)
+                std::string constraint_error;
+                if (!validateControlPointConstraint(constraint, &constraint_error))
                 {
-                    setError(error, "track contains an invalid control-point constraint");
+                    setError(error, "track contains an invalid control-point constraint: " + constraint_error);
                     return false;
                 }
             }
@@ -255,7 +267,7 @@ namespace plabundle
                 setError(error, "problem contains an invalid laser-range constraint");
                 return false;
             }
-            const FrameCamera& source_camera = problem.cameras[static_cast<std::size_t>(constraint.cameraIndex)];
+            const FrameCamera& source_camera = effective_cameras[static_cast<std::size_t>(constraint.cameraIndex)];
             std::array<double, 3> emitter = source_camera.cameraCenter;
             for (int row = 0; row < 3; ++row)
             {
@@ -282,9 +294,10 @@ namespace plabundle
                 }
                 measured_cameras.insert(observation.cameraIndex);
                 Projection projection;
-                if (!projectWorldPoint(problem.cameras[static_cast<std::size_t>(observation.cameraIndex)],
-                                       constraint.initialPoint,
-                                       &projection))
+                if (!projectWorldPointAtLine(effective_cameras[static_cast<std::size_t>(observation.cameraIndex)],
+                                             constraint.initialPoint,
+                                             observation.v,
+                                             &projection))
                 {
                     setError(error, "laser-range initial point must project in front of each measured camera");
                     return false;
@@ -304,8 +317,8 @@ namespace plabundle
                     auto right = std::next(left);
                     for (; right != measured_cameras.end(); ++right)
                     {
-                        if (squaredDistance(problem.cameras[static_cast<std::size_t>(*left)].cameraCenter,
-                                            problem.cameras[static_cast<std::size_t>(*right)].cameraCenter) > 1.0e-16)
+                        if (squaredDistance(effective_cameras[static_cast<std::size_t>(*left)].cameraCenter,
+                                            effective_cameras[static_cast<std::size_t>(*right)].cameraCenter) > 1.0e-16)
                         {
                             has_baseline = true;
                             break;

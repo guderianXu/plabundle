@@ -2,6 +2,7 @@
 
 #include "BundleAdjustPlaMatrixConstraints.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <stdexcept>
@@ -17,20 +18,42 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
             return parameter != static_cast<std::size_t>(BAIntrinsicParameter::FocalAspectRatio);
         }
 
+        void addCameraPoseResidual(plamatrix::internal::BlockNormalEquations<double>* equations,
+                                   const CameraPosePrimaryTerms& terms,
+                                   const ConstraintLinearization& linearization)
+        {
+            if (!equations || terms.count == 0)
+            {
+                return;
+            }
+            const std::size_t term_count = std::min(terms.count, terms.blocks.size());
+            std::array<const double*, 2> jacobians{};
+            for (std::size_t index = 0; index < term_count; ++index)
+            {
+                jacobians[index] = terms.jacobians[index].data();
+            }
+            equations->addPrimaryResidualBlocks(terms.blocks.data(),
+                                                jacobians.data(),
+                                                term_count,
+                                                linearization.residual.data(),
+                                                linearization.residualSize,
+                                                linearization.normalWeight);
+        }
+
         double assemblePrimaryPriors(const BAOptions& options,
                                      const ActiveProblem& active,
                                      const OptimizationState& state,
                                      int iteration,
-                                     plamatrix::BlockNormalEquations<double>* equations)
+                                     plamatrix::internal::BlockNormalEquations<double>* equations)
         {
             double cost = 0.0;
             for (std::size_t group_index = 0; group_index < state.intrinsicGroups.size(); ++group_index)
             {
                 const auto& group = state.intrinsicGroups[group_index];
                 const auto active_parameters = activeIntrinsicParameters(options, group.enabled, iteration);
-                std::array<double, 9> residual{};
-                std::array<double, 81> jacobian{};
-                for (std::size_t parameter = 0; parameter < 9; ++parameter)
+                std::array<double, kBAIntrinsicParameterCount> residual{};
+                std::array<double, kBAIntrinsicParameterCount * kBAIntrinsicParameterCount> jacobian{};
+                for (std::size_t parameter = 0; parameter < kBAIntrinsicParameterCount; ++parameter)
                 {
                     if (!active_parameters[parameter])
                     {
@@ -42,60 +65,63 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                         if (parameter == static_cast<std::size_t>(BAIntrinsicParameter::FocalLength))
                         {
                             residual[parameter] = weight * (group.parameters[parameter] - group.focalReference);
-                            jacobian[parameter * 9 + parameter] = weight;
+                            jacobian[parameter * kBAIntrinsicParameterCount + parameter] = weight;
                         }
                         else
                         {
                             residual[parameter] = weight * (group.parameters[parameter] - group.prior[parameter]);
-                            jacobian[parameter * 9 + parameter] = weight;
+                            jacobian[parameter * kBAIntrinsicParameterCount + parameter] = weight;
                         }
                     }
                     else
                     {
                         residual[parameter] =
                             group.inverseSigma[parameter] * (group.parameters[parameter] - group.prior[parameter]);
-                        jacobian[parameter * 9 + parameter] = group.inverseSigma[parameter];
+                        jacobian[parameter * kBAIntrinsicParameterCount + parameter] = group.inverseSigma[parameter];
                     }
                     cost += 0.5 * residual[parameter] * residual[parameter];
                 }
                 if (equations)
                 {
-                    equations->addPrimaryResidualBlock(
-                        active.cameraBlockCount + static_cast<int>(group_index), jacobian.data(), residual.data(), 9);
+                    equations->addPrimaryResidualBlock(active.cameraBlockCount + static_cast<int>(group_index),
+                                                       jacobian.data(),
+                                                       residual.data(),
+                                                       static_cast<int>(kBAIntrinsicParameterCount));
                 }
             }
             for (std::size_t camera_index = 0; camera_index < state.cameras.size(); ++camera_index)
             {
-                const int block = active.cameraBlock[camera_index];
-                if (block < 0)
-                {
-                    continue;
-                }
                 ConstraintLinearization linearization;
                 if (camera_index < options.cameraPosePriors.size() &&
                     linearizePosePrior(
                         state.cameras[camera_index], options.cameraPosePriors[camera_index], options, &linearization))
                 {
-                    cost += linearization.robustCost;
-                    if (equations)
+                    const CameraPosePrimaryTerms terms = cameraPosePrimaryTerms(options,
+                                                                                active,
+                                                                                state,
+                                                                                camera_index,
+                                                                                linearization.primaryJacobian.data(),
+                                                                                linearization.residualSize,
+                                                                                kPrimaryBlockSize);
+                    if (terms.count > 0)
                     {
-                        equations->addPrimaryResidualBlock(block,
-                                                           linearization.primaryJacobian.data(),
-                                                           linearization.residual.data(),
-                                                           linearization.residualSize,
-                                                           linearization.normalWeight);
+                        cost += linearization.robustCost;
+                        addCameraPoseResidual(equations, terms, linearization);
                     }
                 }
                 if (linearizeCameraPlane(state.cameras[camera_index], camera_index, options, &linearization))
                 {
-                    cost += linearization.robustCost;
-                    if (equations)
+                    const CameraPosePrimaryTerms terms = cameraPosePrimaryTerms(options,
+                                                                                active,
+                                                                                state,
+                                                                                camera_index,
+                                                                                linearization.primaryJacobian.data(),
+                                                                                linearization.residualSize,
+                                                                                kPrimaryBlockSize);
+                    if (terms.count > 0)
                     {
-                        equations->addPrimaryResidualBlock(block,
-                                                           linearization.primaryJacobian.data(),
-                                                           linearization.residual.data(),
-                                                           linearization.residualSize,
-                                                           linearization.normalWeight);
+                        cost += linearization.robustCost;
+                        addCameraPoseResidual(equations, terms, linearization);
                     }
                 }
             }
@@ -105,7 +131,7 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
         double assembleScaleBars(const BAOptions& options,
                                  const ActiveProblem& active,
                                  const OptimizationState& state,
-                                 plamatrix::BlockNormalEquations<double>* equations)
+                                 plamatrix::internal::BlockNormalEquations<double>* equations)
         {
             if (!options.enableScaleBarConstraints)
             {
@@ -164,7 +190,7 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                                    const ActiveProblem& active,
                                    const OptimizationState& state,
                                    int iteration,
-                                   plamatrix::BlockNormalEquations<double>* equations)
+                                   plamatrix::internal::BlockNormalEquations<double>* equations)
         {
             if (!options.enableLaserRangeConstraints)
             {
@@ -180,25 +206,35 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                         state.cameras[static_cast<std::size_t>(shot.cameraIndex)], shot, point, options, &constraint))
                 {
                     cost += constraint.robustCost;
-                    const int camera_block = active.cameraBlock[static_cast<std::size_t>(shot.cameraIndex)];
                     const int point_block = active.laserBlock[shot_index];
-                    if (equations && camera_block >= 0 && point_block >= 0)
+                    const CameraPosePrimaryTerms terms =
+                        cameraPosePrimaryTerms(options,
+                                               active,
+                                               state,
+                                               static_cast<std::size_t>(shot.cameraIndex),
+                                               constraint.primaryJacobian.data(),
+                                               constraint.residualSize,
+                                               kPrimaryBlockSize);
+                    if (equations && terms.count > 0 && point_block >= 0)
                     {
-                        equations->addResidualBlock(camera_block,
-                                                    point_block,
-                                                    constraint.primaryJacobian.data(),
-                                                    constraint.pointJacobian.data(),
-                                                    constraint.residual.data(),
-                                                    1,
-                                                    constraint.normalWeight);
+                        const std::size_t term_count = std::min(terms.count, terms.blocks.size());
+                        std::array<const double*, 2> jacobians{};
+                        for (std::size_t index = 0; index < term_count; ++index)
+                        {
+                            jacobians[index] = terms.jacobians[index].data();
+                        }
+                        equations->addResidualBlocks(terms.blocks.data(),
+                                                     jacobians.data(),
+                                                     term_count,
+                                                     point_block,
+                                                     constraint.pointJacobian.data(),
+                                                     constraint.residual.data(),
+                                                     1,
+                                                     constraint.normalWeight);
                     }
-                    else if (equations && camera_block >= 0)
+                    else if (terms.count > 0)
                     {
-                        equations->addPrimaryResidualBlock(camera_block,
-                                                           constraint.primaryJacobian.data(),
-                                                           constraint.residual.data(),
-                                                           1,
-                                                           constraint.normalWeight);
+                        addCameraPoseResidual(equations, terms, constraint);
                     }
                     else
                     {
@@ -236,7 +272,7 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                                                    iteration,
                                                    &linearization))
                     {
-                        throw std::runtime_error("PlaMatrix BA 激光测距像点线性化失败");
+                        throw InvalidProjectionError("PlaMatrix BA 激光测距像点线性化失败");
                     }
                     cost += linearization.robustCost;
                     addObservation(equations,
@@ -259,7 +295,7 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                                    const ActiveProblem& active,
                                    const OptimizationState& state,
                                    int iteration,
-                                   plamatrix::BlockNormalEquations<double>* equations)
+                                   plamatrix::internal::BlockNormalEquations<double>* equations)
     {
         return assemblePrimaryPriors(options, active, state, iteration, equations) +
                assembleScaleBars(options, active, state, equations) +

@@ -15,6 +15,10 @@ namespace plabundle::internal::plamatrix_ba
         std::vector<char> activeTrack;
         std::vector<char> activeLaserRange;
         std::vector<int> cameraBlock;
+        std::vector<int> rigCaptureBlockByCamera;
+        std::vector<int> rigSensorBlockByCamera;
+        std::vector<int> rigCaptureIndexByCamera;
+        std::vector<int> rigSensorIndexByCamera;
         std::vector<int> intrinsicBlockByCamera;
         std::vector<int> calibrationGroupByCamera;
         std::vector<int> trackPrimaryBlock;
@@ -22,6 +26,8 @@ namespace plabundle::internal::plamatrix_ba
         std::vector<int> laserBlock;
         int primaryBlockCount = 0;
         int cameraBlockCount = 0;
+        int rigCaptureBlockCount = 0;
+        int rigSensorBlockCount = 0;
         int intrinsicBlockCount = 0;
         int promotedTrackBlockCount = 0;
         int trackBlockCount = 0;
@@ -32,17 +38,17 @@ namespace plabundle::internal::plamatrix_ba
         int rejectedInitialTracks = 0;
     };
 
-    inline constexpr int kPrimaryBlockSize = 9;
+    inline constexpr int kPrimaryBlockSize = static_cast<int>(kBAIntrinsicParameterCount);
     inline constexpr int kEliminatedBlockSize = 3;
 
     struct IntrinsicGroupState
     {
-        std::array<double, 9> parameters{};
-        std::array<double, 9> prior{};
-        std::array<double, 9> inverseSigma{};
-        std::array<double, 9> transitionWeight{};
-        std::array<double, 9> lower{};
-        std::array<double, 9> upper{};
+        std::array<double, kBAIntrinsicParameterCount> parameters{};
+        std::array<double, kBAIntrinsicParameterCount> prior{};
+        std::array<double, kBAIntrinsicParameterCount> inverseSigma{};
+        std::array<double, kBAIntrinsicParameterCount> transitionWeight{};
+        std::array<double, kBAIntrinsicParameterCount> lower{};
+        std::array<double, kBAIntrinsicParameterCount> upper{};
         BAIntrinsicParameterMask enabled{};
         double focalReference = 1.0;
         double aspectReference = 1.0;

@@ -1,5 +1,6 @@
 #include <plabundle/solver.h>
 
+#include "control_point_internal.h"
 #include "internal/BundleAdjustPlaMatrix.h"
 #include "internal/BundleAdjustPlaMatrixRuntime.h"
 #include "internal/BundleAdjustQuality.h"
@@ -18,6 +19,62 @@ namespace plabundle
 {
     namespace
     {
+        struct ConstraintRmsUncertainty
+        {
+            double laserPlaneMeters = 0.0;
+            double laserRangeMeters = 0.0;
+            double controlPointMeters = 0.0;
+            double scaleBarMeters = 0.0;
+        };
+
+        ConstraintRmsUncertainty constraintRmsUncertainty(const Problem& problem, const Options& options)
+        {
+            double laser_plane_variance = 0.0;
+            double laser_range_variance = 0.0;
+            double control_point_variance = 0.0;
+            double scale_bar_variance = 0.0;
+            std::size_t laser_plane_count = 0;
+            std::size_t laser_range_count = 0;
+            std::size_t control_point_count = 0;
+            std::size_t scale_bar_count = 0;
+            for (const Track& track : problem.tracks)
+            {
+                for (const LaserPlaneConstraint& constraint : track.laserPlaneConstraints)
+                {
+                    laser_plane_variance += 1.0 / (options.laserPlaneWeight * constraint.weight);
+                    ++laser_plane_count;
+                }
+                for (const ControlPointConstraint& constraint : track.controlPointConstraints)
+                {
+                    double rms_uncertainty = 0.0;
+                    if (internal::controlPointRmsUncertaintyMeters(constraint, &rms_uncertainty))
+                    {
+                        control_point_variance +=
+                            rms_uncertainty * rms_uncertainty / (options.controlPointWeight * constraint.weight);
+                        ++control_point_count;
+                    }
+                }
+            }
+            for (const LaserRangeConstraint& constraint : problem.laserRangeConstraints)
+            {
+                laser_range_variance += constraint.sigmaRangeMeters * constraint.sigmaRangeMeters /
+                                        (options.laserRangeWeight * constraint.weight);
+                ++laser_range_count;
+            }
+            for (const ScaleBarConstraint& constraint : problem.scaleBarConstraints)
+            {
+                scale_bar_variance +=
+                    constraint.sigmaMeters * constraint.sigmaMeters / (options.scaleBarWeight * constraint.weight);
+                ++scale_bar_count;
+            }
+            const auto rms = [](double variance, std::size_t count)
+            { return count > 0 ? std::sqrt(variance / static_cast<double>(count)) : 0.0; };
+            return {rms(laser_plane_variance, laser_plane_count),
+                    rms(laser_range_variance, laser_range_count),
+                    rms(control_point_variance, control_point_count),
+                    rms(scale_bar_variance, scale_bar_count)};
+        }
+
         Result makeFailure(const Problem& problem,
                            Backend requestedBackend,
                            Backend usedBackend,
@@ -34,6 +91,7 @@ namespace plabundle
             result.observationCount = summarizeProblem(problem).observationCount;
             result.quality.totalTracks = static_cast<int>(problem.tracks.size());
             result.refinedCameras = problem.cameras;
+            result.refinedRig = problem.rig;
             result.points.resize(problem.tracks.size());
             for (std::size_t index = 0; index < problem.tracks.size(); ++index)
             {
@@ -42,7 +100,10 @@ namespace plabundle
             return result;
         }
 
-        bool resultFailsQualityGate(const Result& result, const Options& options, std::string* message)
+        bool resultFailsQualityGate(const Problem& problem,
+                                    const Result& result,
+                                    const Options& options,
+                                    std::string* message)
         {
             if (!options.enableBackendQualityGate)
             {
@@ -97,28 +158,33 @@ namespace plabundle
             }
 
             const double max_constraint_growth = std::max(1.0, options.maxAcceptedConstraintRmsGrowth);
+            const ConstraintRmsUncertainty uncertainty = constraintRmsUncertainty(problem, options);
             return !internal::constraintRmsPassesQualityGate(quality.laserConstraintCount,
                                                              quality.laserRmsBeforeMeters,
                                                              quality.laserRmsAfterMeters,
                                                              max_constraint_growth,
+                                                             uncertainty.laserPlaneMeters,
                                                              "laser-plane constraints",
                                                              message) ||
                    !internal::constraintRmsPassesQualityGate(quality.laserRangeConstraintCount,
                                                              quality.laserRangeRmsBeforeMeters,
                                                              quality.laserRangeRmsAfterMeters,
                                                              max_constraint_growth,
+                                                             uncertainty.laserRangeMeters,
                                                              "laser-range constraints",
                                                              message) ||
                    !internal::constraintRmsPassesQualityGate(quality.controlPointConstraintCount,
                                                              quality.controlPointRmsBeforeMeters,
                                                              quality.controlPointRmsAfterMeters,
                                                              max_constraint_growth,
+                                                             uncertainty.controlPointMeters,
                                                              "control-point constraints",
                                                              message) ||
                    !internal::constraintRmsPassesQualityGate(quality.scaleBarConstraintCount,
                                                              quality.scaleBarRmsBeforeMeters,
                                                              quality.scaleBarRmsAfterMeters,
                                                              max_constraint_growth,
+                                                             uncertainty.scaleBarMeters,
                                                              "scale-bar constraints",
                                                              message);
         }
@@ -139,15 +205,13 @@ namespace plabundle
 
         bool needsJointSolver(const Problem& problem, const Options& options)
         {
-            const bool refine_extended_intrinsics =
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::FocalAspectRatio) ||
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::PrincipalPointX) ||
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::PrincipalPointY) ||
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::RadialK1) ||
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::RadialK2) ||
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::RadialK3) ||
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::TangentialP1) ||
-                sharedIntrinsicParameterEnabled(options, IntrinsicParameter::TangentialP2);
+            bool refine_extended_intrinsics = false;
+            for (std::size_t parameter = 1; parameter < kIntrinsicParameterCount; ++parameter)
+            {
+                refine_extended_intrinsics =
+                    refine_extended_intrinsics ||
+                    sharedIntrinsicParameterEnabled(options, static_cast<IntrinsicParameter>(parameter));
+            }
             return options.refineCameraPose ||
                    sharedIntrinsicParameterEnabled(options, IntrinsicParameter::FocalLength) ||
                    refine_extended_intrinsics || hasSoftConstraints(problem);
@@ -174,13 +238,34 @@ namespace plabundle
             target->timing.totalSeconds += source.timing.totalSeconds;
         }
 
+        void rejectByQualityGate(Result* result, const std::string& selectionReason, const std::string& message)
+        {
+            const std::string solver_message = result->backendMessage;
+            result->qualityGateRejected = true;
+            result->qualityGateMessage = message;
+            result->solutionUsable = false;
+            if (result->status == SolveStatus::Success || result->status == SolveStatus::NoConvergence)
+            {
+                result->status = SolveStatus::NumericalFailure;
+            }
+            result->backendSelectionReason = selectionReason;
+            result->backendMessage = joinedMessage(joinedMessage(selectionReason, solver_message), message);
+        }
+
         Result runConcreteBackend(const Problem& problem,
                                   const Options& options,
                                   Backend requestedBackend,
                                   Backend usedBackend,
                                   const std::string& selectionReason)
         {
-            const std::vector<internal::CameraState> cameras = internal::makeCameraStates(problem.cameras);
+            std::vector<FrameCamera> composed_cameras;
+            std::string rig_error;
+            if (!composeRigCameras(problem.cameras, problem.rig, &composed_cameras, &rig_error))
+            {
+                return makeFailure(
+                    problem, requestedBackend, usedBackend, SolveStatus::InvalidInput, rig_error, selectionReason);
+            }
+            const std::vector<internal::CameraState> cameras = internal::makeCameraStates(composed_cameras);
             const internal::BAOptions solver_options = internal::makeSolverOptions(problem, options, usedBackend);
             internal::BAOptions normalized_options;
             const internal::BundleAdjustValidationResult validation = internal::validateAndNormalizeBundleAdjustOptions(
@@ -216,21 +301,53 @@ namespace plabundle
             return fallback;
         }
 
-        void rejectByQualityGate(Result* result, const std::string& selectionReason, const std::string& message)
+        Result runQualityCheckedCpuFallback(const Problem& problem,
+                                            const Options& options,
+                                            Backend requestedBackend,
+                                            const std::string& reason,
+                                            const Result* previousAttempt = nullptr,
+                                            const std::string& previousQualityMessage = {})
         {
-            result->qualityGateRejected = true;
-            result->qualityGateMessage = message;
-            result->solutionUsable = false;
-            if (result->status == SolveStatus::Success || result->status == SolveStatus::NoConvergence)
+            Result fallback = runCpuFallback(problem, options, requestedBackend, reason, previousAttempt);
+            if (fallback.status == SolveStatus::Cancelled)
             {
-                result->status = SolveStatus::NumericalFailure;
+                fallback.backendSelectionReason = reason + "; cpu_fallback_cancelled";
+                return fallback;
             }
-            result->backendFallback = false;
-            result->backendSelectionReason = selectionReason;
-            result->backendMessage = joinedMessage(selectionReason, message);
+            std::string fallback_quality_message;
+            if (resultFailsQualityGate(problem, fallback, options, &fallback_quality_message))
+            {
+                const std::string combined_message =
+                    previousQualityMessage.empty()
+                        ? fallback_quality_message
+                        : joinedMessage("candidate quality rejection: " + previousQualityMessage,
+                                        "CPU fallback quality rejection: " + fallback_quality_message);
+                rejectByQualityGate(&fallback, reason + "; cpu_fallback_quality_gate_rejected", combined_message);
+                return fallback;
+            }
+            fallback.backendSelectionReason =
+                reason + (options.enableBackendQualityGate ? "; cpu_fallback_quality_gate_passed"
+                                                           : "; cpu_fallback_quality_gate_disabled");
+            if (!previousQualityMessage.empty())
+            {
+                fallback.qualityGateRejected = true;
+                fallback.qualityGateMessage = previousQualityMessage;
+                fallback.backendMessage = joinedMessage(fallback.backendMessage, previousQualityMessage);
+            }
+            return fallback;
         }
 
     } // namespace
+
+    Result Solver::solve(const Problem& problem) const
+    {
+        return solve(problem, SolveOptions{});
+    }
+
+    Result Solver::solve(const Problem& problem, const SolveOptions& options) const
+    {
+        return solve(problem, makeCompatibilityOptions(options));
+    }
 
     Result Solver::solve(const Problem& problem, const Options& options) const
     {
@@ -270,7 +387,7 @@ namespace plabundle
                 }
 
                 std::string quality_message;
-                if (resultFailsQualityGate(candidate, options, &quality_message))
+                if (resultFailsQualityGate(problem, candidate, options, &quality_message))
                 {
                     if (decision.backend == Backend::PlaMatrixCpu)
                     {
@@ -280,11 +397,8 @@ namespace plabundle
                     }
                     const std::string fallback_reason =
                         decision.reason + "; accelerated_candidate_quality_gate_rejected; fallback_to_plamatrix_cpu";
-                    Result fallback = runCpuFallback(problem, options, Backend::Auto, fallback_reason, &candidate);
-                    fallback.qualityGateRejected = true;
-                    fallback.qualityGateMessage = quality_message;
-                    fallback.backendMessage = joinedMessage(fallback.backendMessage, quality_message);
-                    return fallback;
+                    return runQualityCheckedCpuFallback(
+                        problem, options, Backend::Auto, fallback_reason, &candidate, quality_message);
                 }
 
                 candidate.backendSelectionReason = decision.reason + "; quality_gate_passed";
@@ -299,7 +413,7 @@ namespace plabundle
             {
                 if (options.allowBackendFallback && requested_backend != Backend::PlaMatrixCpu)
                 {
-                    return runCpuFallback(
+                    return runQualityCheckedCpuFallback(
                         problem, options, requested_backend, unavailable_message + "; fallback_to_plamatrix_cpu");
                 }
                 return makeFailure(problem,
@@ -312,15 +426,37 @@ namespace plabundle
 
             Result result =
                 runConcreteBackend(problem, options, requested_backend, requested_backend, "explicit_backend");
+            if (result.status == SolveStatus::Cancelled)
+            {
+                result.backendSelectionReason = "explicit_backend; cancelled_no_fallback";
+                return result;
+            }
+
+            std::string quality_message;
+            if (resultFailsQualityGate(problem, result, options, &quality_message))
+            {
+                if (options.allowBackendFallback && requested_backend != Backend::PlaMatrixCpu)
+                {
+                    const std::string fallback_reason =
+                        "explicit_backend; accelerated_candidate_quality_gate_rejected; fallback_to_plamatrix_cpu";
+                    return runQualityCheckedCpuFallback(
+                        problem, options, requested_backend, fallback_reason, &result, quality_message);
+                }
+                rejectByQualityGate(&result, "explicit_backend; quality_gate_rejected", quality_message);
+                return result;
+            }
             if (!result.solutionUsable && result.status != SolveStatus::Cancelled && options.allowBackendFallback &&
                 requested_backend != Backend::PlaMatrixCpu)
             {
-                return runCpuFallback(problem,
-                                      options,
-                                      requested_backend,
-                                      joinedMessage(result.backendMessage, "fallback_to_plamatrix_cpu"),
-                                      &result);
+                return runQualityCheckedCpuFallback(problem,
+                                                    options,
+                                                    requested_backend,
+                                                    joinedMessage(result.backendMessage, "fallback_to_plamatrix_cpu"),
+                                                    &result);
             }
+            result.backendSelectionReason = options.enableBackendQualityGate
+                                                ? "explicit_backend; quality_gate_passed"
+                                                : "explicit_backend; quality_gate_disabled";
             return result;
         }
         catch (const std::bad_alloc&)
@@ -360,6 +496,7 @@ namespace plabundle
         case Backend::Auto:
         case Backend::PlaMatrixCpu:
         case Backend::PlaMatrixCuda:
+        case Backend::PlaMatrixVulkan:
         case Backend::PlaMatrixOpenCl:
             return {true, true, true, true, true, true, true, true};
         default:
@@ -389,7 +526,29 @@ namespace plabundle
                                      observation_count >= std::max(1, options.minPlaMatrixOpenClDenseObservations);
             return regular_scale || dense_scale;
         }
+        if (backend == Backend::PlaMatrixVulkan)
+        {
+            const bool regular_scale = camera_count >= std::max(1, options.minPlaMatrixVulkanCameras) &&
+                                       observation_count >= std::max(1, options.minPlaMatrixVulkanObservations);
+            const bool dense_scale = camera_count >= dense_camera_threshold &&
+                                     observation_count >= std::max(1, options.minPlaMatrixVulkanDenseObservations);
+            return regular_scale || dense_scale;
+        }
         return false;
+    }
+
+    bool Solver::autoBackendMeetsScaleThreshold(Backend backend,
+                                                const ProblemStats& stats,
+                                                const SolveOptions& options) noexcept
+    {
+        try
+        {
+            return autoBackendMeetsScaleThreshold(backend, stats, makeCompatibilityOptions(options));
+        }
+        catch (...)
+        {
+            return false;
+        }
     }
 
     BackendDecision Solver::decideBackendForProblem(const Problem& problem, const Options& options)
@@ -413,6 +572,15 @@ namespace plabundle
                     regular_scale ? "large_joint_problem_uses_plamatrix_cuda"
                                   : "dense_joint_problem_uses_plamatrix_cuda"};
         }
+        if (autoBackendMeetsScaleThreshold(Backend::PlaMatrixVulkan, stats, options) &&
+            isBackendAvailable(Backend::PlaMatrixVulkan, options.plaMatrixDevice))
+        {
+            const bool regular_scale = stats.cameraCount >= std::max(1, options.minPlaMatrixVulkanCameras) &&
+                                       stats.observationCount >= std::max(1, options.minPlaMatrixVulkanObservations);
+            return {Backend::PlaMatrixVulkan,
+                    regular_scale ? "large_joint_problem_uses_plamatrix_vulkan"
+                                  : "dense_joint_problem_uses_plamatrix_vulkan"};
+        }
         if (autoBackendMeetsScaleThreshold(Backend::PlaMatrixOpenCl, stats, options) &&
             isBackendAvailable(Backend::PlaMatrixOpenCl, options.plaMatrixDevice))
         {
@@ -427,7 +595,17 @@ namespace plabundle
                                             : "joint_problem_uses_plamatrix_cpu"};
     }
 
+    BackendDecision Solver::decideBackendForProblem(const Problem& problem, const SolveOptions& options)
+    {
+        return decideBackendForProblem(problem, makeCompatibilityOptions(options));
+    }
+
     Backend Solver::selectBackendForProblem(const Problem& problem, const Options& options)
+    {
+        return decideBackendForProblem(problem, options).backend;
+    }
+
+    Backend Solver::selectBackendForProblem(const Problem& problem, const SolveOptions& options)
     {
         return decideBackendForProblem(problem, options).backend;
     }

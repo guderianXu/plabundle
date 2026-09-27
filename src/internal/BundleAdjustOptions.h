@@ -4,6 +4,7 @@
 #include "CameraState.h"
 
 #include <plabundle/options.h>
+#include <plabundle/rig.h>
 
 #include <vector>
 
@@ -28,6 +29,7 @@ namespace plabundle::internal
         BAGaugePolicy gaugePolicy = BAGaugePolicy::AutoAnchor;
         std::vector<int> fixedCameraIndices;
         std::vector<int> fixedTrackIndices;
+        RigTopology rig;
     };
 
     inline bool sharedIntrinsicParameterEnabled(const BAOptions& options, BAIntrinsicParameter parameter) noexcept

@@ -2,5 +2,6 @@
 
 int plabundlePublicHeaderOptions()
 {
-    return plabundle::Options{}.maxIterations;
+    return plabundle::SolveOptions{}.solver.maxIterations + plabundle::Options{}.maxIterations +
+           static_cast<int>(plabundle::ImageRobustLoss::Cauchy);
 }
