@@ -9,9 +9,9 @@ result publication.
 
 | Align Photos field | PlaBundle field | Required conversion |
 | --- | --- | --- |
-| `RegisteredCamera::pose.rotation` | `FrameCamera::cameraToWorldRotation` | transpose the world-to-camera matrix |
-| `camera_center(RegisteredCamera::pose)` | `FrameCamera::cameraCenter` | copy after conversion to the active metric solver frame |
-| `CameraModel::f/cx/cy/b1/b2/k1..k4/p1..p4` | `MetashapeFrameCalibration` | exact field-for-field mapping through `applyMetashapeFrameCalibration` |
+| `RegisteredCamera::pose.rotation` | `FramePinholeNumericState::pose().cameraToWorldRotation` | transpose the world-to-camera matrix |
+| `camera_center(RegisteredCamera::pose)` | `FramePinholeNumericState::pose().center` | copy after conversion to the active metric solver frame |
+| `CameraModel::f/cx/cy/b1/b2/k1..k4/p1..p4` | `placamera::MetashapeCalibration` | exact field-for-field mapping through PlaCamera's calibration API |
 | `RegisteredCamera::sensor_id` | `Problem::cameraCalibrationGroupIds` | assign one dense group id per sensor id |
 | keypoint `x/y/scale` | `Observation::u/v/measurementScale` | use the remapped active-camera index; keep pixel coordinates unchanged |
 | `--robust-loss least-squares` | `SolverControlOptions::imageRobustLoss = ImageRobustLoss::LeastSquares` | default; `imageRobustLossScalePixels` remains positive but is not used by the least-squares formula |

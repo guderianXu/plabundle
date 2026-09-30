@@ -168,6 +168,9 @@ namespace plabundle
     struct QualityGateOptions
     {
         bool enabled = true;
+        // Set to 0 to disable only the image reprojection RMS-growth check.
+        // Non-finite results, valid-track ratio, and constraint gates remain
+        // active while the quality gate is enabled.
         double maxAcceptedRmsGrowth = 1.25;
         double minAcceptedValidTrackRatio = 0.60;
         double maxAcceptedConstraintRmsGrowth = 1.25;
@@ -284,6 +287,7 @@ namespace plabundle
         bool allowBackendFallback = true;
         // Every concrete candidate, including CPU fallbacks, is checked before publication.
         bool enableBackendQualityGate = true;
+        // Set to 0 to disable only the image reprojection RMS-growth check.
         double maxAcceptedRmsGrowth = 1.25;
         double minAcceptedValidTrackRatio = 0.60;
         double maxAcceptedConstraintRmsGrowth = 1.25;

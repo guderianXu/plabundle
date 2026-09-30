@@ -1,31 +1,23 @@
 include(GoogleTest)
 
 add_executable(test_plabundle
-    test_adaptive_camera_model.cpp
-    test_backend_selection.cpp
-    test_constraint_jacobians.cpp
-    test_camera.cpp
+    test_native_problem.cpp
     test_linescan.cpp
     test_options.cpp
-    test_photo_alignment.cpp
-    test_problem.cpp
-    test_solver.cpp
-    test_solver_internals.cpp
     public_header_adaptive_camera_model.cpp
     public_header_backend.cpp
-    public_header_camera.cpp
     public_header_linescan.cpp
     public_header_constraints.cpp
     public_header_options.cpp
     public_header_photo_alignment.cpp
     public_header_problem.cpp
-    public_header_rig.cpp
     public_header_result.cpp
     public_header_solver.cpp
     public_header_version.cpp
 )
 target_link_libraries(test_plabundle PRIVATE
     plabundle::plabundle
+    placamera::placamera
     plamatrix::plamatrix
     GTest::gtest_main
 )
@@ -37,6 +29,13 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DPLABUNDLE_PUBLIC_INCLUDE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../include/plabundle
         -P ${CMAKE_CURRENT_SOURCE_DIR}/check_public_dependencies.cmake
+)
+
+add_test(
+    NAME PlaBundle.CameraBoundary
+    COMMAND ${CMAKE_COMMAND}
+        -DPLABUNDLE_PUBLIC_INCLUDE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../include/plabundle
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_camera_boundary.cmake
 )
 
 add_test(

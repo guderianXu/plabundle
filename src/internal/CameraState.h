@@ -1,6 +1,7 @@
 #pragma once
 
-#include <plabundle/camera.h>
+#include <placamera/bundle_linearization.h>
+#include <placamera/frame_numeric_state.h>
 
 #include <array>
 #include <optional>
@@ -9,6 +10,23 @@
 
 namespace plabundle::internal
 {
+
+    inline constexpr std::size_t kCameraParameterCount = 13;
+    using CameraParameterBlock = std::array<double, kCameraParameterCount>;
+    using CameraParameterMask = std::array<bool, kCameraParameterCount>;
+
+    struct Projection
+    {
+        std::array<double, 2> pixel{{0.0, 0.0}};
+        double positiveDepth = 0.0;
+    };
+
+    struct ProjectionLinearization
+    {
+        Projection projection;
+        std::array<double, 6> cameraPointJacobian{};
+        std::array<double, 2 * kCameraParameterCount> parameterJacobian{};
+    };
 
     class CameraState final
     {
@@ -22,6 +40,7 @@ namespace plabundle::internal
             double pixelPitch = 1.0;
             int uAxisSign = 1;
             int vAxisSign = 1;
+            double skew = 0.0;
         };
 
         struct Distortion
@@ -36,12 +55,11 @@ namespace plabundle::internal
             double tangentialP4 = 0.0;
         };
 
-        CameraState() = default;
-        explicit CameraState(FrameCamera camera);
+        explicit CameraState(placamera::FramePinholeNumericState camera);
 
         bool validateNumericalState(std::string* error = nullptr) const noexcept;
         bool isValid() const noexcept;
-        std::optional<ImageSize> imageSize() const noexcept;
+        std::optional<placamera::ImageSize> imageSize() const noexcept;
         Intrinsics intrinsics() const noexcept;
         Distortion distortion() const noexcept;
         std::array<double, 9> cameraToWorldRotation() const noexcept;
@@ -53,7 +71,10 @@ namespace plabundle::internal
         int uAxisSign() const noexcept;
         int vAxisSign() const noexcept;
         bool depthAxisFlipped() const noexcept;
-        FrameProjectionModel projectionModel() const noexcept;
+        placamera::FrameProjectionModel projectionModel() const noexcept;
+        bool rollingShutterEnabled() const noexcept;
+        placamera::BrownTangentialConvention tangentialConvention() const noexcept;
+        double skewPixels() const noexcept;
         CameraParameterBlock parameterBlock() const noexcept;
         CameraParameterMask supportedParameters() const noexcept;
 
@@ -69,7 +90,7 @@ namespace plabundle::internal
         void setPose(const std::array<double, 9>& rotation, const std::array<double, 3>& center) noexcept;
         void setCameraCenter(const std::array<double, 3>& center) noexcept;
         void setIntrinsics(double focalX, double focalY, double principalX, double principalY) noexcept;
-        void setImageSize(ImageSize imageSize) noexcept;
+        void setImageSize(placamera::ImageSize imageSize) noexcept;
         void setAxisDirections(int uDirection, int vDirection) noexcept;
         void setDistortion(const Distortion& distortion) noexcept;
         void setDistortion(double k1, double k2, double k3, double p1, double p2) noexcept;
@@ -79,13 +100,20 @@ namespace plabundle::internal
         void applyDeltaPose(const double delta[6]) noexcept;
         CameraState normalizedForPositiveDepth() const noexcept;
 
-        const FrameCamera& frameCamera() const noexcept;
+        bool linearize(const std::array<double, 3>& point,
+                       double observationLine,
+                       bool includeParameters,
+                       ProjectionLinearization* output) const noexcept;
+        const placamera::FramePinholeNumericState& nativeState() const noexcept;
+        placamera::FramePinholeNumericState& nativeState() noexcept;
 
     private:
-        FrameCamera _camera;
+        placamera::FramePinholeNumericState _camera;
     };
 
-    std::vector<CameraState> makeCameraStates(const std::vector<FrameCamera>& cameras);
-    std::vector<FrameCamera> makeFrameCameras(const std::vector<CameraState>& cameras);
+    std::vector<CameraState> makeCameraStates(const std::vector<placamera::FramePinholeNumericState>& cameras);
+    std::vector<placamera::FramePinholeNumericState>
+    makeNumericStates(const std::vector<CameraState>& cameras,
+                      const std::vector<placamera::FramePinholeNumericState>& templates);
 
 } // namespace plabundle::internal

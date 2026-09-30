@@ -84,7 +84,7 @@ namespace plabundle::internal
         {
             target.cameraCalibrationGroupIds.assign(problem.cameras.size(), 0);
             std::vector<std::pair<int, int>> sensor_keys;
-            for (const RigCameraBinding& binding : problem.rig.cameraBindings)
+            for (const placamera::RigCameraBinding& binding : problem.rig.cameraBindings)
             {
                 const std::pair<int, int> key{binding.rigId, binding.sensorId};
                 auto found = std::find(sensor_keys.begin(), sensor_keys.end(), key);
@@ -119,17 +119,17 @@ namespace plabundle::internal
         target.fixedCameraIndices = problem.fixedCameraIndices;
         if (!problem.rig.empty())
         {
-            for (const RigCameraBinding& binding : problem.rig.cameraBindings)
+            for (const placamera::RigCameraBinding& binding : problem.rig.cameraBindings)
             {
                 const auto capture =
                     std::find_if(problem.rig.captures.begin(),
                                  problem.rig.captures.end(),
-                                 [&](const RigCapture& value)
+                                 [&](const placamera::RigCapture& value)
                                  { return value.rigId == binding.rigId && value.captureId == binding.captureId; });
                 const auto sensor =
                     std::find_if(problem.rig.sensors.begin(),
                                  problem.rig.sensors.end(),
-                                 [&](const RigSensor& value)
+                                 [&](const placamera::RigSensor& value)
                                  { return value.rigId == binding.rigId && value.sensorId == binding.sensorId; });
                 if (capture->fixedPose && sensor->fixedExtrinsic &&
                     std::find(target.fixedCameraIndices.begin(),
@@ -146,6 +146,7 @@ namespace plabundle::internal
     }
 
     Result makePublicResult(const BAResult& source,
+                            const Problem& problem,
                             Backend requestedBackend,
                             Backend usedBackend,
                             const std::string& selectionReason)
@@ -248,7 +249,12 @@ namespace plabundle::internal
                        source.laserRangeShots.end(),
                        std::back_inserter(target.laserRangeShots),
                        makeRefinedLaserRangeShot);
-        target.refinedCameras = makeFrameCameras(source.refinedCameras);
+        target.refinedCameras = makeNumericStates(source.refinedCameras, problem.cameras);
+        if (target.refinedCameras.size() != source.refinedCameras.size())
+        {
+            target.solutionUsable = false;
+            target.backendMessage += "; refined_camera_metadata_mismatch";
+        }
         target.refinedRig = source.refinedRig;
         return target;
     }

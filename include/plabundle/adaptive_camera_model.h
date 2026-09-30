@@ -1,6 +1,5 @@
 #pragma once
 
-#include <plabundle/camera.h>
 #include <plabundle/options.h>
 #include <plabundle/problem.h>
 
@@ -49,8 +48,8 @@ namespace plabundle
     AdaptiveCameraModelAssessment assessAdaptiveCameraModel(const Problem& problem, const SolveOptions& options);
     bool applyAdaptiveCameraModel(const AdaptiveCameraModelAssessment& assessment, Options* options);
     bool applyAdaptiveCameraModel(const AdaptiveCameraModelAssessment& assessment, SolveOptions* options);
-    bool restoreInactiveAdaptiveIntrinsics(std::vector<FrameCamera>* cameras,
-                                           const std::vector<FrameCamera>& stableReferences,
+    bool restoreInactiveAdaptiveIntrinsics(std::vector<placamera::FramePinholeNumericState>* cameras,
+                                           const std::vector<placamera::FramePinholeNumericState>& stableReferences,
                                            const IntrinsicParameterMask& activeMask);
 
 } // namespace plabundle

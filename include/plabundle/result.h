@@ -1,10 +1,11 @@
 #pragma once
 
 #include <plabundle/backend.h>
-#include <plabundle/camera.h>
 #include <plabundle/constraints.h>
 #include <plabundle/options.h>
-#include <plabundle/rig.h>
+
+#include <placamera/frame_numeric_state.h>
+#include <placamera/camera_topology.h>
 
 #include <array>
 #include <string>
@@ -144,8 +145,8 @@ namespace plabundle
         PlaMatrixDiagnostics plaMatrix;
         std::vector<RefinedPoint> points;
         std::vector<RefinedLaserRangeShot> laserRangeShots;
-        std::vector<FrameCamera> refinedCameras;
-        RigTopology refinedRig;
+        std::vector<placamera::FramePinholeNumericState> refinedCameras;
+        placamera::RigTopology refinedRig;
 
         bool usable() const noexcept
         {

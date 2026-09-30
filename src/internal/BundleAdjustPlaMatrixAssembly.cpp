@@ -5,9 +5,14 @@
 #include "BundleAdjustValidation.h"
 #include "OpenMpCompat.h"
 
+#include <placamera/rig_topology.h>
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
+#include <iostream>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -18,7 +23,7 @@ namespace plabundle::internal::plamatrix_ba
     {
         bool useReferencePointParameterization(const BAOptions& options)
         {
-            return options.rig.empty() && !options.enableLaserPlaneConstraints &&
+            return options.useReferenceOnlineSchur && options.rig.empty() && !options.enableLaserPlaneConstraints &&
                    !options.enableControlPointConstraints && !options.enableLaserRangeConstraints &&
                    !options.enableScaleBarConstraints;
         }
@@ -125,12 +130,6 @@ namespace plabundle::internal::plamatrix_ba
         void applyReferenceCameraPoseStep(CameraState* camera, const double* delta)
         {
             auto rotation = camera->cameraToWorldRotation();
-            // 转到参考 type-4 矩阵约定 R*diag(1,-1,-1)。
-            for (int row = 0; row < 3; ++row)
-            {
-                rotation[static_cast<std::size_t>(row * 3 + 1)] *= -1.0;
-                rotation[static_cast<std::size_t>(row * 3 + 2)] *= -1.0;
-            }
             const double sx = std::sin(delta[0]);
             const double cx = std::cos(delta[0]);
             const double sy = std::sin(delta[1]);
@@ -157,12 +156,21 @@ namespace plabundle::internal::plamatrix_ba
                 }
                 return product;
             };
-            rotation = multiply(multiply(multiply(rotation, rx), ry), rz);
+            const auto euler = multiply(multiply(rx, ry), rz);
+            std::array<double, 9> target_left{};
+            constexpr std::array<double, 3> signs{{1.0, -1.0, -1.0}};
+            // The recovered target retraction is Rwc' = Rwc * D * E * D.
+            // CameraState stores C2W=Rwc^T, hence C2W' = D * E^T * D * C2W.
             for (int row = 0; row < 3; ++row)
             {
-                rotation[static_cast<std::size_t>(row * 3 + 1)] *= -1.0;
-                rotation[static_cast<std::size_t>(row * 3 + 2)] *= -1.0;
+                for (int column = 0; column < 3; ++column)
+                {
+                    target_left[static_cast<std::size_t>(row * 3 + column)] =
+                        signs[static_cast<std::size_t>(row)] * euler[static_cast<std::size_t>(column * 3 + row)] *
+                        signs[static_cast<std::size_t>(column)];
+                }
             }
+            rotation = multiply(target_left, rotation);
             auto center = camera->cameraCenter();
             center[0] += delta[3];
             center[1] += delta[4];
@@ -431,6 +439,41 @@ namespace plabundle::internal::plamatrix_ba
             }
         }
 
+        void prepareEffectiveCameraCache(const std::vector<CameraState>& input_cameras,
+                                         const BAOptions& options,
+                                         const ActiveProblem& active,
+                                         const OptimizationState& state,
+                                         int iteration,
+                                         EffectiveCameraCache* cache)
+        {
+            if (!cache)
+            {
+                return;
+            }
+            cache->cameras.clear();
+            cache->activeParameters.clear();
+            if (state.intrinsicGroups.empty())
+            {
+                return;
+            }
+            const auto& references = options.sharedIntrinsicReferenceCameras.empty()
+                                         ? input_cameras
+                                         : options.sharedIntrinsicReferenceCameras;
+            cache->cameras = state.cameras;
+            cache->activeParameters.resize(state.cameras.size());
+            for (std::size_t camera_index = 0; camera_index < state.cameras.size(); ++camera_index)
+            {
+                const std::size_t group_index = static_cast<std::size_t>(active.calibrationGroupByCamera[camera_index]);
+                const auto active_parameters =
+                    activeIntrinsicParameters(options, state.intrinsicGroups[group_index].enabled, iteration);
+                cache->activeParameters[camera_index] = active_parameters;
+                cache->cameras[camera_index] = cameraWithSharedIntrinsics(state.cameras[camera_index],
+                                                                          references[camera_index],
+                                                                          state.intrinsicGroups[group_index].parameters,
+                                                                          active_parameters);
+            }
+        }
+
         bool linearizeImageObservation(const std::vector<CameraState>& input_cameras,
                                        const BAOptions& options,
                                        const ActiveProblem& active,
@@ -439,7 +482,8 @@ namespace plabundle::internal::plamatrix_ba
                                        const std::array<double, 3>& point,
                                        const BAObservation& observation,
                                        int iteration,
-                                       ObservationLinearization* output)
+                                       ObservationLinearization* output,
+                                       const EffectiveCameraCache* effective_camera_cache)
         {
             const bool reference_point_parameterization = useReferencePointParameterization(options);
             if (state.intrinsicGroups.empty())
@@ -454,6 +498,19 @@ namespace plabundle::internal::plamatrix_ba
                                             reference_point_parameterization);
             }
             const std::size_t group_index = static_cast<std::size_t>(active.calibrationGroupByCamera[camera_index]);
+            if (effective_camera_cache && effective_camera_cache->cameras.size() == state.cameras.size() &&
+                effective_camera_cache->activeParameters.size() == state.cameras.size())
+            {
+                return linearizeObservationWithActiveIntrinsics(effective_camera_cache->cameras[camera_index],
+                                                                effective_camera_cache->activeParameters[camera_index],
+                                                                point,
+                                                                observation,
+                                                                options.imageRobustLoss,
+                                                                options.imageRobustLossScalePixels,
+                                                                output,
+                                                                true,
+                                                                reference_point_parameterization);
+            }
             const auto active_parameters =
                 activeIntrinsicParameters(options, state.intrinsicGroups[group_index].enabled, iteration);
             const auto& references = options.sharedIntrinsicReferenceCameras.empty()
@@ -472,6 +529,55 @@ namespace plabundle::internal::plamatrix_ba
                                                             reference_point_parameterization);
         }
 
+        bool evaluateImageObservationCost(const std::vector<CameraState>& input_cameras,
+                                          const BAOptions& options,
+                                          const ActiveProblem& active,
+                                          const OptimizationState& state,
+                                          std::size_t camera_index,
+                                          const std::array<double, 3>& point,
+                                          const BAObservation& observation,
+                                          int iteration,
+                                          double* cost,
+                                          const EffectiveCameraCache* effective_camera_cache)
+        {
+            if (state.intrinsicGroups.empty())
+            {
+                return evaluateObservationCost(state.cameras[camera_index],
+                                               point,
+                                               observation,
+                                               options.imageRobustLoss,
+                                               options.imageRobustLossScalePixels,
+                                               cost,
+                                               true);
+            }
+            const std::size_t group_index = static_cast<std::size_t>(active.calibrationGroupByCamera[camera_index]);
+            if (effective_camera_cache && effective_camera_cache->cameras.size() == state.cameras.size())
+            {
+                return evaluateObservationCost(effective_camera_cache->cameras[camera_index],
+                                               point,
+                                               observation,
+                                               options.imageRobustLoss,
+                                               options.imageRobustLossScalePixels,
+                                               cost,
+                                               true);
+            }
+            const auto active_parameters =
+                activeIntrinsicParameters(options, state.intrinsicGroups[group_index].enabled, iteration);
+            const auto& references = options.sharedIntrinsicReferenceCameras.empty()
+                                         ? input_cameras
+                                         : options.sharedIntrinsicReferenceCameras;
+            return evaluateObservationCostWithSharedIntrinsics(state.cameras[camera_index],
+                                                               references[camera_index],
+                                                               state.intrinsicGroups[group_index].parameters,
+                                                               active_parameters,
+                                                               point,
+                                                               observation,
+                                                               options.imageRobustLoss,
+                                                               options.imageRobustLossScalePixels,
+                                                               cost,
+                                                               true);
+        }
+
     } // namespace assembly_detail
 
     namespace
@@ -486,7 +592,8 @@ namespace plabundle::internal::plamatrix_ba
                                   std::size_t begin,
                                   std::size_t end,
                                   plamatrix::internal::BlockNormalEquations<double>* equations,
-                                  int eliminated_block_offset)
+                                  int eliminated_block_offset,
+                                  const EffectiveCameraCache* effective_camera_cache)
         {
             double cost = 0.0;
             for (std::size_t track_index = begin; track_index < end; ++track_index)
@@ -503,6 +610,25 @@ namespace plabundle::internal::plamatrix_ba
                         continue;
                     }
                     const std::size_t camera_index = static_cast<std::size_t>(observation.cameraIndex);
+                    if (!equations)
+                    {
+                        double observation_cost = 0.0;
+                        if (!assembly_detail::evaluateImageObservationCost(input_cameras,
+                                                                           options,
+                                                                           active,
+                                                                           state,
+                                                                           camera_index,
+                                                                           point,
+                                                                           observation,
+                                                                           iteration,
+                                                                           &observation_cost,
+                                                                           effective_camera_cache))
+                        {
+                            throw InvalidProjectionError("PlaMatrix BA 目标值评估失败：活动轨迹产生了非法投影");
+                        }
+                        cost += observation_cost;
+                        continue;
+                    }
                     ObservationLinearization linearization;
                     if (!assembly_detail::linearizeImageObservation(input_cameras,
                                                                     options,
@@ -512,7 +638,8 @@ namespace plabundle::internal::plamatrix_ba
                                                                     point,
                                                                     observation,
                                                                     iteration,
-                                                                    &linearization))
+                                                                    &linearization,
+                                                                    effective_camera_cache))
                     {
                         throw InvalidProjectionError("PlaMatrix BA 线性化失败：活动轨迹产生了非法投影");
                     }
@@ -574,14 +701,56 @@ namespace plabundle::internal::plamatrix_ba
                                       plamatrix::internal::BlockNormalEquations<double>* equations,
                                       NormalEquationAssemblyWorkspace* workspace)
         {
-            const int requested_threads = options.numThreads > 0 ? options.numThreads : openMpMaxThreads();
+            const bool trace_assembly = std::getenv("METALIGN_TRACE_PLABUNDLE_ASSEMBLY") != nullptr;
+            const auto total_start = std::chrono::steady_clock::now();
+            const char* assembly_thread_override = std::getenv("METALIGN_PLABUNDLE_ASSEMBLY_THREADS");
+            int requested_threads = options.numThreads > 0 ? options.numThreads : openMpMaxThreads();
+            if (assembly_thread_override)
+            {
+                const int override_threads = std::atoi(assembly_thread_override);
+                if (override_threads > 0)
+                {
+                    requested_threads = override_threads;
+                }
+            }
             const int thread_count = std::min<int>(std::max(1, requested_threads), static_cast<int>(tracks.size()));
+            EffectiveCameraCache local_effective_camera_cache;
+            EffectiveCameraCache* effective_camera_cache =
+                workspace ? &workspace->effectiveCameraCache : &local_effective_camera_cache;
+            const auto cache_start = std::chrono::steady_clock::now();
+            assembly_detail::prepareEffectiveCameraCache(
+                input_cameras, options, active, state, iteration, effective_camera_cache);
+            const double cache_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - cache_start).count();
             if (thread_count <= 1 || tracks.size() < 128)
             {
-                return assembleTrackRange(
-                    input_cameras, tracks, options, active, state, iteration, 0, tracks.size(), equations, 0);
+                const auto serial_start = std::chrono::steady_clock::now();
+                const double cost = assembleTrackRange(input_cameras,
+                                                       tracks,
+                                                       options,
+                                                       active,
+                                                       state,
+                                                       iteration,
+                                                       0,
+                                                       tracks.size(),
+                                                       equations,
+                                                       0,
+                                                       effective_camera_cache);
+                if (trace_assembly)
+                {
+                    const double serial_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - serial_start).count();
+                    const double total_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - total_start).count();
+                    std::cerr << "TRACE_PLABUNDLE_ASSEMBLY tracks=" << tracks.size()
+                              << " threads=1 cache=" << cache_seconds
+                              << " serial=" << serial_seconds
+                              << " total=" << total_seconds << '\n';
+                }
+                return cost;
             }
 
+            const auto partition_start = std::chrono::steady_clock::now();
             std::vector<std::size_t> local_boundaries;
             auto* boundaries = workspace ? &workspace->trackBoundaries : &local_boundaries;
             if (!workspace || workspace->partitionThreadCount != thread_count ||
@@ -624,7 +793,10 @@ namespace plabundle::internal::plamatrix_ba
                     workspace->partitionThreadCount = thread_count;
                 }
             }
+            const double partition_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - partition_start).count();
 
+            const auto partial_setup_start = std::chrono::steady_clock::now();
             std::vector<double> local_partial_costs;
             std::vector<std::exception_ptr> local_errors;
             auto* partial_costs = workspace ? &workspace->partialCosts : &local_partial_costs;
@@ -691,7 +863,10 @@ namespace plabundle::internal::plamatrix_ba
                     }
                 }
             }
+            const double partial_setup_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - partial_setup_start).count();
 
+            const auto parallel_start = std::chrono::steady_clock::now();
 #pragma omp parallel for num_threads(thread_count) schedule(static, 1)
             for (int thread = 0; thread < thread_count; ++thread)
             {
@@ -709,14 +884,18 @@ namespace plabundle::internal::plamatrix_ba
                         begin,
                         end,
                         equations ? (*partial_equations)[static_cast<std::size_t>(thread)].get() : nullptr,
-                        use_eliminated_shards ? eliminated_offsets[static_cast<std::size_t>(thread)] : 0);
+                        use_eliminated_shards ? eliminated_offsets[static_cast<std::size_t>(thread)] : 0,
+                        effective_camera_cache);
                 }
                 catch (...)
                 {
                     (*errors)[static_cast<std::size_t>(thread)] = std::current_exception();
                 }
             }
+            const double parallel_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - parallel_start).count();
 
+            const auto merge_start = std::chrono::steady_clock::now();
             for (int thread = 0; thread < thread_count; ++thread)
             {
                 const auto index = static_cast<std::size_t>(thread);
@@ -735,6 +914,26 @@ namespace plabundle::internal::plamatrix_ba
                         equations->mergeFrom(*(*partial_equations)[index]);
                     }
                 }
+            }
+            if (trace_assembly)
+            {
+                const double merge_seconds = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - merge_start).count();
+                const double total_seconds = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - total_start).count();
+                const std::size_t active_tracks = static_cast<std::size_t>(std::count(
+                    active.activeTrack.begin(), active.activeTrack.end(), true));
+                std::cerr << "TRACE_PLABUNDLE_ASSEMBLY tracks=" << tracks.size()
+                          << " active_tracks=" << active_tracks
+                          << " threads=" << thread_count
+                          << " cache=" << cache_seconds
+                          << " partition=" << partition_seconds
+                          << " partial_setup=" << partial_setup_seconds
+                          << " parallel=" << parallel_seconds
+                          << " merge=" << merge_seconds
+                          << " total=" << total_seconds
+                          << " eliminated_shards=" << (use_eliminated_shards ? 1 : 0)
+                          << '\n';
             }
             return std::accumulate(partial_costs->begin(), partial_costs->end(), 0.0);
         }
@@ -932,7 +1131,11 @@ namespace plabundle::internal::plamatrix_ba
                 if (block >= 0)
                 {
                     const double* delta = scaled_primary.data() + block * kPrimaryBlockSize;
-                    if (usesReferenceGaugeTangent(options, *state, camera_index))
+                    if (!useReferencePointParameterization(options))
+                    {
+                        state->cameras[camera_index].applyDeltaPose(delta);
+                    }
+                    else if (usesReferenceGaugeTangent(options, *state, camera_index))
                     {
                         const auto center = applyReferenceGaugeTangentStep(options, *state, delta[3], delta[4]);
                         std::array<double, 6> rotation_delta{{delta[0], delta[1], delta[2], 0.0, 0.0, 0.0}};
@@ -954,20 +1157,13 @@ namespace plabundle::internal::plamatrix_ba
                 {
                     return;
                 }
-                FrameCamera pose;
-                pose.cameraToWorldRotation = *rotation;
-                pose.cameraCenter = *center;
-                pose.focalXPixels = 1.0;
-                pose.focalYPixels = 1.0;
                 const double* raw_delta = scaled_primary.data() + block * kPrimaryBlockSize;
                 const std::array<double, 6> delta{
                     {raw_delta[0], raw_delta[1], raw_delta[2], raw_delta[3], raw_delta[4], raw_delta[5]}};
-                if (!plabundle::applyPoseDelta(&pose, delta))
+                if (!placamera::applyPoseDelta(rotation, center, delta))
                 {
                     throw std::runtime_error("rig pose update produced an invalid rigid transform");
                 }
-                *rotation = pose.cameraToWorldRotation;
-                *center = pose.cameraCenter;
             };
 
             for (std::size_t capture_index = 0; capture_index < state->rig.captures.size(); ++capture_index)
@@ -998,13 +1194,18 @@ namespace plabundle::internal::plamatrix_ba
                 RigSensor& sensor = state->rig.sensors[sensor_index];
                 apply_pose(&sensor.cameraToRigRotation, &sensor.cameraCenterInRig, block);
             }
-            std::vector<FrameCamera> composed;
-            std::string error;
-            if (!composeRigCameras(makeFrameCameras(state->cameras), state->rig, &composed, &error))
+            std::vector<placamera::FramePinholeNumericState> native_cameras;
+            native_cameras.reserve(state->cameras.size());
+            for (const CameraState& camera : state->cameras)
             {
-                throw std::runtime_error("rig camera composition failed after update: " + error);
+                native_cameras.push_back(camera.nativeState());
             }
-            state->cameras = makeCameraStates(composed);
+            const auto composed = placamera::composeRigCameras(native_cameras, state->rig);
+            if (!composed)
+            {
+                throw std::runtime_error("rig camera composition failed after update: " + composed.message());
+            }
+            state->cameras = makeCameraStates(composed.value());
         }
         applyIntrinsicStep(active, scaled_primary, &state->intrinsicGroups);
         const bool reference_point_parameterization = useReferencePointParameterization(options);

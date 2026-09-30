@@ -27,7 +27,7 @@ namespace plabundle
     struct PhotoAlignmentCameraState
     {
         std::string id;
-        FrameCamera camera;
+        placamera::FramePinholeNumericState camera;
     };
 
     struct PhotoAlignmentTrackState

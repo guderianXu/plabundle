@@ -19,12 +19,22 @@ namespace plabundle::internal::plamatrix_ba
         std::array<double, 9> hessian{};
         std::array<double, 3> rhs{};
         std::vector<plamatrix::Index> primaryBlocks;
+        std::vector<int> primaryBlockLookup;
         std::vector<ReferenceSchurCrossBlock> crossBlocks;
         std::vector<ReferenceSchurCrossBlock> reducedCrossBlocks;
         std::vector<std::array<char, kPrimaryBlockSize>> activeRows;
 
         void clear() noexcept;
         ReferenceSchurCrossBlock& crossBlock(plamatrix::Index block);
+    };
+
+    struct ReferenceSchurBackSubstitutionData
+    {
+        bool valid = false;
+        std::array<double, 9> inverseHessian{};
+        std::array<double, 3> rhs{};
+        std::vector<plamatrix::Index> primaryBlocks;
+        std::vector<ReferenceSchurCrossBlock> crossBlocks;
     };
 
     struct ReferenceSchurWorkspace
@@ -44,6 +54,8 @@ namespace plabundle::internal::plamatrix_ba
         std::vector<std::exception_ptr> errors;
         std::vector<std::size_t> trackBoundaries;
         std::vector<ReferenceSchurPointWorkspace> pointWorkspaces;
+        std::vector<ReferenceSchurBackSubstitutionData> backSubstitutionData;
+        EffectiveCameraCache effectiveCameraCache;
         std::vector<double> partialDirectionalDecrease;
         std::vector<char> partialBackSubstitutionSuccess;
         int partitionThreadCount = 0;

@@ -7,6 +7,8 @@
 #include "internal/BundleAdjustValidation.h"
 #include "internal/Conversion.h"
 
+#include <placamera/rig_topology.h>
+
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -17,6 +19,24 @@
 
 namespace plabundle
 {
+    struct SolverWorkspace::Impl
+    {
+        plamatrix::internal::SchurComplementSolverWorkspace<double> linearWorkspace;
+    };
+
+    SolverWorkspace::SolverWorkspace() : _impl(std::make_unique<Impl>()) {}
+    SolverWorkspace::~SolverWorkspace() = default;
+    SolverWorkspace::SolverWorkspace(SolverWorkspace&&) noexcept = default;
+    SolverWorkspace& SolverWorkspace::operator=(SolverWorkspace&&) noexcept = default;
+
+    void SolverWorkspace::clear() noexcept
+    {
+        if (_impl)
+        {
+            _impl->linearWorkspace.clear();
+        }
+    }
+
     namespace
     {
         struct ConstraintRmsUncertainty
@@ -256,16 +276,16 @@ namespace plabundle
                                   const Options& options,
                                   Backend requestedBackend,
                                   Backend usedBackend,
-                                  const std::string& selectionReason)
+                                  const std::string& selectionReason,
+                                  plamatrix::internal::SchurComplementSolverWorkspace<double>* linear_workspace)
         {
-            std::vector<FrameCamera> composed_cameras;
-            std::string rig_error;
-            if (!composeRigCameras(problem.cameras, problem.rig, &composed_cameras, &rig_error))
+            const auto composed_cameras = placamera::composeRigCameras(problem.cameras, problem.rig);
+            if (!composed_cameras)
             {
                 return makeFailure(
-                    problem, requestedBackend, usedBackend, SolveStatus::InvalidInput, rig_error, selectionReason);
+                    problem, requestedBackend, usedBackend, SolveStatus::InvalidInput, composed_cameras.message(), selectionReason);
             }
-            const std::vector<internal::CameraState> cameras = internal::makeCameraStates(composed_cameras);
+            const std::vector<internal::CameraState> cameras = internal::makeCameraStates(composed_cameras.value());
             const internal::BAOptions solver_options = internal::makeSolverOptions(problem, options, usedBackend);
             internal::BAOptions normalized_options;
             const internal::BundleAdjustValidationResult validation = internal::validateAndNormalizeBundleAdjustOptions(
@@ -277,20 +297,22 @@ namespace plabundle
             }
 
             const internal::BAResult solver_result =
-                internal::optimizePointsWithPlaMatrix(cameras, problem.tracks, normalized_options);
-            return internal::makePublicResult(solver_result, requestedBackend, usedBackend, selectionReason);
+                internal::optimizePointsWithPlaMatrix(cameras, problem.tracks, normalized_options, linear_workspace);
+            return internal::makePublicResult(solver_result, problem, requestedBackend, usedBackend, selectionReason);
         }
 
         Result runCpuFallback(const Problem& problem,
                               const Options& options,
                               Backend requestedBackend,
                               const std::string& reason,
+                              plamatrix::internal::SchurComplementSolverWorkspace<double>* linear_workspace,
                               const Result* previousAttempt = nullptr)
         {
             Options cpu_options = options;
             cpu_options.backend = Backend::PlaMatrixCpu;
             cpu_options.allowBackendFallback = false;
-            Result fallback = runConcreteBackend(problem, cpu_options, requestedBackend, Backend::PlaMatrixCpu, reason);
+            Result fallback = runConcreteBackend(
+                problem, cpu_options, requestedBackend, Backend::PlaMatrixCpu, reason, linear_workspace);
             fallback.backendFallback = requestedBackend != Backend::PlaMatrixCpu;
             fallback.backendSelectionReason = reason;
             fallback.backendMessage = joinedMessage(reason, fallback.backendMessage);
@@ -305,10 +327,12 @@ namespace plabundle
                                             const Options& options,
                                             Backend requestedBackend,
                                             const std::string& reason,
+                                            plamatrix::internal::SchurComplementSolverWorkspace<double>* linear_workspace,
                                             const Result* previousAttempt = nullptr,
                                             const std::string& previousQualityMessage = {})
         {
-            Result fallback = runCpuFallback(problem, options, requestedBackend, reason, previousAttempt);
+            Result fallback = runCpuFallback(
+                problem, options, requestedBackend, reason, linear_workspace, previousAttempt);
             if (fallback.status == SolveStatus::Cancelled)
             {
                 fallback.backendSelectionReason = reason + "; cpu_fallback_cancelled";
@@ -351,6 +375,22 @@ namespace plabundle
 
     Result Solver::solve(const Problem& problem, const Options& options) const
     {
+        SolverWorkspace workspace;
+        return solve(problem, options, workspace);
+    }
+
+    Result Solver::solve(const Problem& problem, const SolveOptions& options, SolverWorkspace& workspace) const
+    {
+        return solve(problem, makeCompatibilityOptions(options), workspace);
+    }
+
+    Result Solver::solve(const Problem& problem, const Options& options, SolverWorkspace& workspace) const
+    {
+        if (!workspace._impl)
+        {
+            workspace._impl = std::make_unique<SolverWorkspace::Impl>();
+        }
+        auto* linear_workspace = &workspace._impl->linearWorkspace;
         const Backend initial_backend = options.backend == Backend::Auto ? Backend::PlaMatrixCpu : options.backend;
 
         std::string error;
@@ -378,7 +418,8 @@ namespace plabundle
                 selected_options.backend = decision.backend;
                 selected_options.allowBackendFallback = false;
                 Result candidate =
-                    runConcreteBackend(problem, selected_options, Backend::Auto, decision.backend, decision.reason);
+                    runConcreteBackend(problem, selected_options, Backend::Auto, decision.backend, decision.reason,
+                                       linear_workspace);
                 candidate.requestedBackend = Backend::Auto;
                 if (candidate.status == SolveStatus::Cancelled)
                 {
@@ -398,7 +439,7 @@ namespace plabundle
                     const std::string fallback_reason =
                         decision.reason + "; accelerated_candidate_quality_gate_rejected; fallback_to_plamatrix_cpu";
                     return runQualityCheckedCpuFallback(
-                        problem, options, Backend::Auto, fallback_reason, &candidate, quality_message);
+                        problem, options, Backend::Auto, fallback_reason, linear_workspace, &candidate, quality_message);
                 }
 
                 candidate.backendSelectionReason = decision.reason + "; quality_gate_passed";
@@ -414,7 +455,8 @@ namespace plabundle
                 if (options.allowBackendFallback && requested_backend != Backend::PlaMatrixCpu)
                 {
                     return runQualityCheckedCpuFallback(
-                        problem, options, requested_backend, unavailable_message + "; fallback_to_plamatrix_cpu");
+                        problem, options, requested_backend, unavailable_message + "; fallback_to_plamatrix_cpu",
+                        linear_workspace);
                 }
                 return makeFailure(problem,
                                    requested_backend,
@@ -425,7 +467,8 @@ namespace plabundle
             }
 
             Result result =
-                runConcreteBackend(problem, options, requested_backend, requested_backend, "explicit_backend");
+                runConcreteBackend(problem, options, requested_backend, requested_backend, "explicit_backend",
+                                   linear_workspace);
             if (result.status == SolveStatus::Cancelled)
             {
                 result.backendSelectionReason = "explicit_backend; cancelled_no_fallback";
@@ -440,7 +483,7 @@ namespace plabundle
                     const std::string fallback_reason =
                         "explicit_backend; accelerated_candidate_quality_gate_rejected; fallback_to_plamatrix_cpu";
                     return runQualityCheckedCpuFallback(
-                        problem, options, requested_backend, fallback_reason, &result, quality_message);
+                        problem, options, requested_backend, fallback_reason, linear_workspace, &result, quality_message);
                 }
                 rejectByQualityGate(&result, "explicit_backend; quality_gate_rejected", quality_message);
                 return result;
@@ -452,6 +495,7 @@ namespace plabundle
                                                     options,
                                                     requested_backend,
                                                     joinedMessage(result.backendMessage, "fallback_to_plamatrix_cpu"),
+                                                    linear_workspace,
                                                     &result);
             }
             result.backendSelectionReason = options.enableBackendQualityGate

@@ -12,6 +12,11 @@
 
 #include <string>
 
+namespace plamatrix::internal
+{
+    template <typename Scalar> class SchurComplementSolverWorkspace;
+}
+
 namespace plabundle::internal
 {
 
@@ -21,6 +26,7 @@ namespace plabundle::internal
     /// 使用 PlaMatrix 块法方程、Schur 消元和参考 Armijo 驱动执行完整联合 BA。
     BAResult optimizePointsWithPlaMatrix(const std::vector<CameraState>& cameras,
                                          const std::vector<BATrack>& tracks,
-                                         const BAOptions& options);
+                                         const BAOptions& options,
+                                         plamatrix::internal::SchurComplementSolverWorkspace<double>* solver_workspace = nullptr);
 
 } // namespace plabundle::internal

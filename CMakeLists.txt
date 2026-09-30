@@ -16,6 +16,8 @@ option(PLABUNDLE_BUILD_EXAMPLES "Build PlaBundle examples" OFF)
 option(PLABUNDLE_ENABLE_OPENMP "Enable OpenMP in PlaBundle internal loops" ON)
 set(PLABUNDLE_PLAMATRIX_SOURCE_DIR "" CACHE PATH
     "Optional PlaMatrix source tree used by standalone developer builds")
+set(PLABUNDLE_PLACAMERA_SOURCE_DIR "" CACHE PATH
+    "Optional PlaCamera source tree used by standalone developer builds")
 
 if(NOT TARGET plamatrix::plamatrix)
     if(PLABUNDLE_PLAMATRIX_SOURCE_DIR)
@@ -34,6 +36,23 @@ if(NOT TARGET plamatrix::plamatrix)
     endif()
 endif()
 
+if(NOT TARGET placamera::placamera)
+    if(PLABUNDLE_PLACAMERA_SOURCE_DIR)
+        if(NOT EXISTS "${PLABUNDLE_PLACAMERA_SOURCE_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "PLABUNDLE_PLACAMERA_SOURCE_DIR does not contain a CMake project: "
+                "${PLABUNDLE_PLACAMERA_SOURCE_DIR}")
+        endif()
+        add_subdirectory(
+            "${PLABUNDLE_PLACAMERA_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/placamera"
+            EXCLUDE_FROM_ALL
+        )
+    else()
+        find_package(placamera CONFIG REQUIRED)
+    endif()
+endif()
+
 if(PLABUNDLE_ENABLE_OPENMP AND NOT TARGET OpenMP::OpenMP_CXX)
     find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
@@ -41,7 +60,6 @@ endif()
 add_library(plabundle STATIC
     src/adaptive_camera_model.cpp
     src/backend.cpp
-    src/camera.cpp
     src/control_point.cpp
     src/linescan.cpp
     src/linescan_assembly.cpp
@@ -51,7 +69,6 @@ add_library(plabundle STATIC
     src/photo_alignment.cpp
     src/pose_prior.cpp
     src/problem.cpp
-    src/rig.cpp
     src/solver.cpp
     src/internal/BundleAdjustAdaptiveCameraModel.cpp
     src/internal/BundleAdjustPlaMatrix.cpp
@@ -77,7 +94,12 @@ target_include_directories(plabundle
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(plabundle PRIVATE plamatrix::plamatrix)
+target_link_libraries(plabundle
+    PUBLIC
+        placamera::placamera
+    PRIVATE
+        plamatrix::plamatrix
+)
 if(PLABUNDLE_ENABLE_OPENMP)
     target_link_libraries(plabundle PRIVATE OpenMP::OpenMP_CXX)
     target_compile_definitions(plabundle PRIVATE PLABUNDLE_ENABLE_OPENMP=1)

@@ -161,7 +161,8 @@ namespace plabundle::internal
 
     BAResult optimizePointsWithPlaMatrix(const std::vector<CameraState>& cameras,
                                          const std::vector<BATrack>& tracks,
-                                         const BAOptions& options)
+                                         const BAOptions& options,
+                                         plamatrix::internal::SchurComplementSolverWorkspace<double>* solver_workspace)
     {
         BAResult result;
         result.requestedBackend = options.backend;
@@ -213,7 +214,8 @@ namespace plabundle::internal
         int iterations = 0;
         double minimum_linear_tolerance = std::numeric_limits<double>::infinity();
         double maximum_linear_tolerance = 0.0;
-        plamatrix::internal::SchurComplementSolverWorkspace<double> solver_workspace;
+        plamatrix::internal::SchurComplementSolverWorkspace<double> local_solver_workspace;
+        auto& active_solver_workspace = solver_workspace ? *solver_workspace : local_solver_workspace;
         plamatrix_ba::NormalEquationAssemblyWorkspace assembly_workspace(active);
         plamatrix_ba::ReferenceSchurWorkspace reference_schur_workspace(active);
         const bool use_reference_online_schur = plamatrix_ba::canUseReferenceOnlineSchur(options, active);
@@ -315,7 +317,13 @@ namespace plabundle::internal
                          solver_backend == plamatrix::internal::SchurComplementLinearBackend::SparseCpu)
                             ? std::max(50, active.primaryBlockCount * 12)
                             : std::max(200, active.primaryBlockCount * 30);
-                    solver_options.relativeTolerance = 1.0e-12;
+                    // The reference path uses a direct sparse factorization. Its
+                    // post-solve residual guards the factorization; Armijo remains
+                    // the nonlinear acceptance test. Ill-conditioned late
+                    // calibration transitions can retain a 1e-10 relative residual
+                    // after refinement while reproducing the target step. A 1e-12
+                    // gate rejected those valid steps and changed the damping path.
+                    solver_options.relativeTolerance = use_reference_online_schur ? 2.0e-10 : 1.0e-12;
                     minimum_linear_tolerance = std::min(minimum_linear_tolerance, solver_options.relativeTolerance);
                     maximum_linear_tolerance = std::max(maximum_linear_tolerance, solver_options.relativeTolerance);
                     solver_options.absoluteTolerance = 1e-12;
@@ -344,7 +352,7 @@ namespace plabundle::internal
                             plamatrix::internal::solveDampedSchurComplement(equations,
                                                                             use_reference_online_schur ? 0.0 : damping,
                                                                             solver_options,
-                                                                            solver_workspace,
+                                                                            active_solver_workspace,
                                                                             &primary_step,
                                                                             &eliminated_step);
                     }

@@ -529,8 +529,8 @@ namespace plabundle::internal
                 if (!requestedOptions.sharedIntrinsicReferenceCameras.empty() &&
                     (requestedOptions.sharedIntrinsicReferenceCameras[first].projectionModel() !=
                          cameras[first].projectionModel() ||
-                     requestedOptions.sharedIntrinsicReferenceCameras[first].frameCamera().brownTangentialConvention !=
-                         cameras[first].frameCamera().brownTangentialConvention))
+                     requestedOptions.sharedIntrinsicReferenceCameras[first].tangentialConvention() !=
+                         cameras[first].tangentialConvention()))
                 {
                     return invalid(BASolveStatus::InvalidInput,
                                    "BA 输入验证失败: 共享内参参考相机与输入相机的投影模型和畸变约定必须一致");
@@ -542,8 +542,7 @@ namespace plabundle::internal
                                                  : requestedOptions.cameraCalibrationGroupIds[second];
                     if (first_group == second_group &&
                         (cameras[first].projectionModel() != cameras[second].projectionModel() ||
-                         cameras[first].frameCamera().brownTangentialConvention !=
-                             cameras[second].frameCamera().brownTangentialConvention))
+                         cameras[first].tangentialConvention() != cameras[second].tangentialConvention()))
                     {
                         return invalid(BASolveStatus::InvalidInput,
                                        "BA 输入验证失败: 同一共享标定组不能混用不同投影模型或畸变约定");
@@ -565,7 +564,7 @@ namespace plabundle::internal
                                    !std::isfinite(distortion.tangentialP1) || !std::isfinite(distortion.tangentialP2) ||
                                    !std::isfinite(distortion.radialK4) || !std::isfinite(distortion.tangentialP3) ||
                                    !std::isfinite(distortion.tangentialP4) ||
-                                   !std::isfinite(camera.frameCamera().skewPixels);
+                                   !std::isfinite(camera.skewPixels());
                         }))
         {
             return invalid(BASolveStatus::InvalidInput, "BA 输入验证失败: 共享内参参考相机包含非法标定参数");

@@ -51,6 +51,13 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                         int point_eliminated_block,
                         const ObservationLinearization& linearization);
 
+    void prepareEffectiveCameraCache(const std::vector<CameraState>& input_cameras,
+                                     const BAOptions& options,
+                                     const ActiveProblem& active,
+                                     const OptimizationState& state,
+                                     int iteration,
+                                     EffectiveCameraCache* cache);
+
     bool linearizeImageObservation(const std::vector<CameraState>& input_cameras,
                                    const BAOptions& options,
                                    const ActiveProblem& active,
@@ -59,7 +66,8 @@ namespace plabundle::internal::plamatrix_ba::assembly_detail
                                    const std::array<double, 3>& point,
                                    const BAObservation& observation,
                                    int iteration,
-                                   ObservationLinearization* output);
+                                   ObservationLinearization* output,
+                                   const EffectiveCameraCache* effective_camera_cache = nullptr);
 
     double assembleSurveyResiduals(const std::vector<CameraState>& input_cameras,
                                    const BAOptions& options,

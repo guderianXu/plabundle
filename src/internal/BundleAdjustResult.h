@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include <plabundle/rig.h>
+#include <placamera/camera_topology.h>
 
 namespace plabundle::internal
 {
@@ -153,7 +153,7 @@ namespace plabundle::internal
         std::vector<BARefinedPoint> points; ///< 每条轨迹对应的点优化结果（与输入 tracks 索引一一对应）
         std::vector<BARefinedLaserRangeShot> laserRangeShots; ///< 与输入独立测距 shot 一一对应
         std::vector<CameraState> refinedCameras; ///< 优化后的相机列表（与输入 cameras 长度相同）
-        RigTopology refinedRig;                  ///< 优化后的 rig capture/sensor 参数。
+        placamera::RigTopology refinedRig;       ///< 优化后的 rig capture/sensor 参数。
     };
 
 } // namespace plabundle::internal

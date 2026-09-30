@@ -392,7 +392,8 @@ namespace plabundle
         }
         if (!nonNegative(options.maxInitialTrackRms) || options.plaMatrixPreconditionerClusterSize < 1 ||
             options.plaMatrixPreconditionerClusterSize > 16 || !finite(options.maxAcceptedRmsGrowth) ||
-            options.maxAcceptedRmsGrowth < 1.0 || !finite(options.minAcceptedValidTrackRatio) ||
+            (options.maxAcceptedRmsGrowth != 0.0 && options.maxAcceptedRmsGrowth < 1.0) ||
+            !finite(options.minAcceptedValidTrackRatio) ||
             options.minAcceptedValidTrackRatio < 0.0 || options.minAcceptedValidTrackRatio > 1.0 ||
             !finite(options.maxAcceptedConstraintRmsGrowth) || options.maxAcceptedConstraintRmsGrowth < 1.0)
         {

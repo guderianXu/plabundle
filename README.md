@@ -45,6 +45,16 @@ not through duplicate PlaBundle options; for example, add
 `-DPLAMATRIX_WITH_CUDA=ON`, `-DPLAMATRIX_WITH_VULKAN=ON`, or `-DPLAMATRIX_WITH_OPENCL=ON` to a source-tree
 developer build.
 
+## Camera boundary
+
+PlaCamera is the sole owner of camera geometry, projection, calibration and
+rig topology. PlaBundle consumes `placamera::FramePinholeNumericState` values
+through `Problem::cameras` and `Problem::sharedIntrinsicReferenceCameras`, and
+returns the accepted states through `Result::refinedCameras`. PlaBundle does
+not define a second camera or rig implementation: the solver consumes the
+installed PlaCamera numeric-state, projection, parameter-layout, pose-update
+and topology-composition APIs directly.
+
 ## PlaMatrix boundary
 
 PlaBundle owns camera, observation, constraint, and BA solver semantics.
@@ -62,19 +72,15 @@ checking that they do not move BA-specific models into PlaMatrix. Public
 headers are separately checked by `PlaBundle.PublicDependencyBoundary` and
 compiled individually by the `public_header_*` test sources.
 
-## Minimal frame BA
+## Minimal native frame BA
 
 ```cpp
 #include <plabundle/solver.h>
+#include <placamera/frame_numeric_state.h>
 
-plabundle::FrameCamera left;
-left.cameraCenter = {-1.0, 0.0, 0.0};
-left.focalXPixels = left.focalYPixels = 1000.0;
-left.principalXPixel = 500.0;
-left.principalYPixel = 400.0;
-
-plabundle::FrameCamera right = left;
-right.cameraCenter = {1.0, 0.0, 0.0};
+// Build the typed PlaCamera models/numeric states in the application layer.
+placamera::FramePinholeNumericState left = makeNativeCamera("left", {-1.0, 0.0, 0.0});
+placamera::FramePinholeNumericState right = makeNativeCamera("right", {1.0, 0.0, 0.0});
 
 plabundle::Track track;
 track.initialPoint = {0.2, -0.1, 6.0};
@@ -91,6 +97,24 @@ plabundle::SolveOptions options;
 options.calibration.refineCameraPose = false;
 const plabundle::Result result = plabundle::Solver().solve(problem, options);
 ```
+
+When several BA stages run sequentially, keep a caller-owned workspace for
+the whole reconstruction:
+
+```cpp
+plabundle::Solver solver;
+plabundle::SolverWorkspace workspace;
+const plabundle::Result first = solver.solve(problem, options, workspace);
+// Update problem for the next BA stage.
+const plabundle::Result next = solver.solve(problem, options, workspace);
+workspace.clear(); // optional: release cached structure before the next job
+```
+
+The CPU sparse solver reuses symbolic analysis only when the reduced matrix
+pattern matches exactly. Different camera or observation graphs rebuild the
+pattern automatically. A workspace is for sequential calls and must not be
+shared by concurrent solves; the existing `solve(problem, options)` overload
+continues to own a short-lived workspace.
 
 `SolveOptions` keeps independent policy areas separate:
 
@@ -118,10 +142,9 @@ robust loss; survey-constraint losses remain independently configured under
 
 ### Complete Metashape Frame calibration
 
-`applyMetashapeFrameCalibration` and `metashapeFrameCalibration` convert
-between `FrameCamera` and the exact 13-field Metashape contract. The legacy
-nine parameter block remains at indices `[fx, log(fy/fx), cx, cy, k1, k2, k3,
-p1, p2]`; the compatible extension appends `[b2, k4, p3, p4]`. Metashape `f`
+PlaCamera owns the Metashape calibration conversion and parameter layout. The
+legacy nine parameter block remains at indices `[fx, log(fy/fx), cx, cy, k1,
+k2, k3, p1, p2]`; the compatible extension appends `[b2, k4, p3, p4]`. Metashape `f`
 and `b1` are represented losslessly as `fy=f` and `fx=f+b1`.
 
 Applying the calibration selects `BrownTangentialConvention::Metashape`. This
@@ -178,7 +201,7 @@ records into the numeric `Problem` exactly once.
 
 ## Rig BA
 
-`<plabundle/rig.h>` separates a rig into capture poses, reusable sensor
+`<placamera/camera_topology.h>` separates a rig into capture poses, reusable sensor
 extrinsics, and camera bindings. Capture poses use rig-to-world rotations and
 rig centers in world coordinates. Sensor extrinsics use camera-to-rig
 rotations and camera centers in rig coordinates. The composed camera pose is
@@ -341,6 +364,14 @@ scratch, reference-Schur point-elimination/back-substitution buffers, reduced
 CSR topology, sparse symbolic analysis, and backend resident state alive for
 the full solve. Rejected damping retries update numeric values without
 discarding reusable topology or vector capacity.
+
+Shared-intrinsic solves build each iteration's effective camera once per
+camera and reuse it for observation linearization and cost-only Armijo
+evaluation. Reference online Schur assembly normally gives each OpenMP worker
+an exclusive off-diagonal accumulation slot, avoiding atomic updates on the
+hot path. The aggregate slot storage is capped at 128 MiB; larger dense camera
+graphs share slots and use atomic accumulation instead of multiplying memory
+by the worker count.
 
 ## Consume
 

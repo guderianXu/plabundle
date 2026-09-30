@@ -1,5 +1,4 @@
 #include <plabundle/constraints.h>
-#include <plabundle/camera.h>
 
 #include "pose_prior_internal.h"
 
@@ -20,12 +19,12 @@ namespace plabundle
 
         bool finitePose(const CameraPosePrior& prior)
         {
-            FrameCamera camera;
-            camera.cameraToWorldRotation = prior.cameraToWorldRotation;
-            camera.cameraCenter = prior.cameraCenter;
-            camera.focalXPixels = 1.0;
-            camera.focalYPixels = 1.0;
-            return validateFrameCamera(camera);
+            return std::all_of(prior.cameraToWorldRotation.begin(),
+                               prior.cameraToWorldRotation.end(),
+                               [](double value) { return std::isfinite(value); }) &&
+                   std::all_of(prior.cameraCenter.begin(),
+                               prior.cameraCenter.end(),
+                               [](double value) { return std::isfinite(value); });
         }
 
         bool

@@ -2,8 +2,31 @@
 
 ## 0.1.0 - Unreleased
 
+- Skipped intrinsic-parameter derivatives for projection-only and fixed-intrinsic
+  observation paths while retaining the full analytic Jacobian when calibration
+  is active.
+- Reused the ordered nonzero primary-Jacobian indices during reference online
+  Schur Hessian assembly, preserving floating-point accumulation order.
+- Reused the resolved Hessian block address and orientation across element
+  updates in reference online Schur assembly. This preserves accumulation
+  order while reducing repeated sparse-block lookup work.
+- Reused each observation's camera-point projection linearization when forming
+  active shared-intrinsic Jacobians, avoiding a second projection derivative
+  calculation for the same camera and point.
+- Used that same projection result for the image residual and point/pose
+  Jacobians, removing another redundant camera-point projection per observation.
+- Added caller-owned `SolverWorkspace` overloads for sequential BA stages, so
+  unchanged reduced Schur patterns retain PlaMatrix's CSR storage and sparse
+  Cholesky symbolic analysis across independent `solve()` calls. Pattern
+  changes still trigger analysis; `clear()` releases the cached state.
+
 - Established the package boundary from PlaScan's production bundle-adjustment
   module while preserving its MIT license and numerical conventions.
+- Switched the complete camera/rig boundary to the installed PlaCamera APIs:
+  `Problem` and `Result` use `FramePinholeNumericState` and `RigTopology`,
+  PlaCamera owns rig validation/composition and rigid pose updates, and the
+  old `plabundle/camera.h`, `plabundle/rig.h`, `src/camera.cpp`, `src/rig.cpp`
+  and obsolete tests are removed.
 - Added the independently buildable and installable `plabundle::plabundle`
   CMake package.
 - Added pure numeric frame-pinhole/Brown-Conrady camera, problem, option,
@@ -57,6 +80,10 @@
   scratch, back-substitution buffers, and solver step capacity across nonlinear
   iterations to avoid repeated host allocations while preserving deterministic
   reduction order.
+- Cached effective shared-intrinsic cameras once per iteration for both
+  linearization and cost-only objective evaluation, and removed off-diagonal
+  atomic contention from ordinary reference-Schur assembly with exclusive
+  worker slots plus a 128 MiB adaptive memory cap.
 - Treats an invalid projection from an Armijo derivative/trial state as an
   inadmissible candidate and continues backtracking or damping, while retaining
   hard failures for the accepted state and preserving solver diagnostics when

@@ -663,8 +663,7 @@ namespace plabundle::internal
                     continue;
                 }
                 ProjectionLinearization model_linearization;
-                if (!linearizeCameraPoint(
-                        camera.frameCamera(), {cameraPoint[0], cameraPoint[1], cameraPoint[2]}, &model_linearization))
+                if (!camera.linearize({world[0], world[1], world[2]}, observation.v, true, &model_linearization))
                 {
                     continue;
                 }

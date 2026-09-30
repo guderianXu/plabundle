@@ -13,6 +13,7 @@ namespace plabundle::internal
 
     BAOptions makeSolverOptions(const Problem& problem, const Options& options, Backend usedBackend);
     Result makePublicResult(const BAResult& source,
+                            const Problem& problem,
                             Backend requestedBackend,
                             Backend usedBackend,
                             const std::string& selectionReason = {});

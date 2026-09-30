@@ -62,8 +62,8 @@ namespace plabundle
         return applied;
     }
 
-    bool restoreInactiveAdaptiveIntrinsics(std::vector<FrameCamera>* cameras,
-                                           const std::vector<FrameCamera>& stableReferences,
+    bool restoreInactiveAdaptiveIntrinsics(std::vector<placamera::FramePinholeNumericState>* cameras,
+                                           const std::vector<placamera::FramePinholeNumericState>& stableReferences,
                                            const IntrinsicParameterMask& activeMask)
     {
         if (!cameras)
@@ -76,7 +76,12 @@ namespace plabundle
         {
             return false;
         }
-        *cameras = internal::makeFrameCameras(camera_states);
+        const auto converted = internal::makeNumericStates(camera_states, *cameras);
+        if (converted.size() != cameras->size())
+        {
+            return false;
+        }
+        *cameras = converted;
         return true;
     }
 

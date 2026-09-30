@@ -46,17 +46,17 @@ namespace plabundle::internal::plamatrix_ba
         std::vector<char> camera_has_residual(cameras.size(), 0);
         if (!options.rig.empty())
         {
-            for (const RigCameraBinding& binding : options.rig.cameraBindings)
+            for (const placamera::RigCameraBinding& binding : options.rig.cameraBindings)
             {
                 const auto capture =
                     std::find_if(options.rig.captures.begin(),
                                  options.rig.captures.end(),
-                                 [&](const RigCapture& value)
+                                 [&](const placamera::RigCapture& value)
                                  { return value.rigId == binding.rigId && value.captureId == binding.captureId; });
                 const auto sensor =
                     std::find_if(options.rig.sensors.begin(),
                                  options.rig.sensors.end(),
-                                 [&](const RigSensor& value)
+                                 [&](const placamera::RigSensor& value)
                                  { return value.rigId == binding.rigId && value.sensorId == binding.sensorId; });
                 const std::size_t camera_index = static_cast<std::size_t>(binding.cameraIndex);
                 problem.rigCaptureIndexByCamera[camera_index] =

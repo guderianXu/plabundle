@@ -118,3 +118,19 @@ TEST(PlaBundleOptionsTest, StructuredValidationReportsTheOwningGroupFailure)
     EXPECT_FALSE(plabundle::validateOptions(options, &error));
     EXPECT_NE(error.find("robust loss value"), std::string::npos);
 }
+
+TEST(PlaBundleOptionsTest, ZeroDisablesOnlyTheImageRmsGrowthGate)
+{
+    plabundle::SolveOptions structured;
+    structured.quality.maxAcceptedRmsGrowth = 0.0;
+    EXPECT_TRUE(plabundle::validateOptions(structured));
+
+    const plabundle::Options compatibility =
+        plabundle::makeCompatibilityOptions(structured);
+    EXPECT_DOUBLE_EQ(compatibility.maxAcceptedRmsGrowth, 0.0);
+    EXPECT_TRUE(compatibility.enableBackendQualityGate);
+    EXPECT_TRUE(plabundle::validateOptions(compatibility));
+
+    structured.quality.maxAcceptedRmsGrowth = 0.5;
+    EXPECT_FALSE(plabundle::validateOptions(structured));
+}

@@ -1,5 +1,9 @@
 #include <plabundle/problem.h>
 
+#include "internal/CameraState.h"
+
+#include <placamera/rig_topology.h>
+
 #include <algorithm>
 #include <cmath>
 #include <iterator>
@@ -97,10 +101,11 @@ namespace plabundle
             return dx * dx + dy * dy + dz * dz;
         }
 
-        bool sameCalibrationFamily(const FrameCamera& left, const FrameCamera& right) noexcept
+        bool sameCalibrationFamily(const placamera::FramePinholeNumericState& left,
+                                   const placamera::FramePinholeNumericState& right) noexcept
         {
-            return left.projectionModel == right.projectionModel &&
-                   left.brownTangentialConvention == right.brownTangentialConvention;
+            return left.projectionModel() == right.projectionModel() &&
+                   left.distortion().tangentialConvention == right.distortion().tangentialConvention;
         }
 
     } // namespace
@@ -156,15 +161,18 @@ namespace plabundle
             setError(error, "problem requires at least one track");
             return false;
         }
-        std::vector<FrameCamera> effective_cameras;
-        if (!composeRigCameras(problem.cameras, problem.rig, &effective_cameras, error))
+        const auto composed_cameras = placamera::composeRigCameras(problem.cameras, problem.rig);
+        if (!composed_cameras)
         {
+            setError(error, composed_cameras.message());
             return false;
         }
+        const auto& effective_cameras = composed_cameras.value();
         for (std::size_t index = 0; index < effective_cameras.size(); ++index)
         {
+            internal::CameraState camera(effective_cameras[index]);
             std::string camera_error;
-            if (!validateFrameCamera(effective_cameras[index], &camera_error))
+            if (!camera.validateNumericalState(&camera_error))
             {
                 setError(error, "camera " + std::to_string(index) + " is invalid: " + camera_error);
                 return false;
@@ -195,10 +203,11 @@ namespace plabundle
             setError(error, "shared intrinsic reference cameras must be empty or aligned with cameras");
             return false;
         }
-        for (std::size_t index = 0; index < problem.sharedIntrinsicReferenceCameras.size(); ++index)
+        const auto& shared_reference_cameras = problem.sharedIntrinsicReferenceCameras;
+        for (std::size_t index = 0; index < shared_reference_cameras.size(); ++index)
         {
-            const FrameCamera& camera = problem.sharedIntrinsicReferenceCameras[index];
-            if (!validateFrameCamera(camera) || !sameCalibrationFamily(camera, effective_cameras[index]))
+            internal::CameraState camera(shared_reference_cameras[index]);
+            if (!camera.isValid() || !sameCalibrationFamily(shared_reference_cameras[index], effective_cameras[index]))
             {
                 setError(error,
                          "shared intrinsic reference camera is invalid or uses a different projection/convention");
@@ -267,14 +276,14 @@ namespace plabundle
                 setError(error, "problem contains an invalid laser-range constraint");
                 return false;
             }
-            const FrameCamera& source_camera = effective_cameras[static_cast<std::size_t>(constraint.cameraIndex)];
-            std::array<double, 3> emitter = source_camera.cameraCenter;
+            const auto& source_camera = effective_cameras[static_cast<std::size_t>(constraint.cameraIndex)];
+            std::array<double, 3> emitter = source_camera.pose().center;
             for (int row = 0; row < 3; ++row)
             {
                 for (int column = 0; column < 3; ++column)
                 {
                     emitter[static_cast<std::size_t>(row)] +=
-                        source_camera.cameraToWorldRotation[static_cast<std::size_t>(row * 3 + column)] *
+                        source_camera.pose().cameraToWorldRotation[static_cast<std::size_t>(row * 3 + column)] *
                         constraint.leverArmCameraMeters[static_cast<std::size_t>(column)];
                 }
             }
@@ -293,11 +302,9 @@ namespace plabundle
                     return false;
                 }
                 measured_cameras.insert(observation.cameraIndex);
-                Projection projection;
-                if (!projectWorldPointAtLine(effective_cameras[static_cast<std::size_t>(observation.cameraIndex)],
-                                             constraint.initialPoint,
-                                             observation.v,
-                                             &projection))
+                const auto& camera = effective_cameras[static_cast<std::size_t>(observation.cameraIndex)];
+                const placamera::GroundCoordinate ground{camera.groundFrame(), constraint.initialPoint};
+                if (!camera.groundToImage(ground))
                 {
                     setError(error, "laser-range initial point must project in front of each measured camera");
                     return false;
@@ -317,8 +324,8 @@ namespace plabundle
                     auto right = std::next(left);
                     for (; right != measured_cameras.end(); ++right)
                     {
-                        if (squaredDistance(effective_cameras[static_cast<std::size_t>(*left)].cameraCenter,
-                                            effective_cameras[static_cast<std::size_t>(*right)].cameraCenter) > 1.0e-16)
+                        if (squaredDistance(effective_cameras[static_cast<std::size_t>(*left)].pose().center,
+                                            effective_cameras[static_cast<std::size_t>(*right)].pose().center) > 1.0e-16)
                         {
                             has_baseline = true;
                             break;

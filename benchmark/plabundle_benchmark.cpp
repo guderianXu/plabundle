@@ -1,4 +1,5 @@
 #include <plabundle/solver.h>
+#include <placamera/frame_numeric_state.h>
 
 #include <algorithm>
 #include <array>
@@ -30,31 +31,45 @@ namespace
         std::string backends = "plamatrix_cpu,plamatrix_cuda,plamatrix_vulkan,plamatrix_opencl,auto";
     };
 
-    plabundle::FrameCamera makeCamera(double centerX, double centerY, double centerZ)
+    placamera::FramePinholeNumericState makeCamera(double centerX, double centerY, double centerZ, int index)
     {
-        plabundle::FrameCamera camera;
-        camera.cameraCenter = {centerX, centerY, centerZ};
-        camera.focalXPixels = 1000.0;
-        camera.focalYPixels = 1000.0;
-        camera.principalXPixel = 512.0;
-        camera.principalYPixel = 384.0;
-        return camera;
+        placamera::FrameIntrinsics intrinsics;
+        intrinsics.focalX = 1000.0;
+        intrinsics.focalY = 1000.0;
+        intrinsics.principalX = 512.0;
+        intrinsics.principalY = 384.0;
+        const auto definition = placamera::FramePinholeDefinition::create(
+            placamera::CameraDefinitionId("benchmark-definition"),
+            intrinsics,
+            {},
+            placamera::PixelConvention::PixelCenter,
+            placamera::FrameId("world"));
+        const auto model = placamera::FramePinholeModel::create(
+            placamera::CameraInstanceId("camera-" + std::to_string(index)),
+            placamera::ImageId("image-" + std::to_string(index)),
+            definition,
+            {1024, 768},
+            placamera::Pose::create(
+                placamera::FrameId("world"),
+                {centerX, centerY, centerZ},
+                {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}));
+        return placamera::FramePinholeNumericState::fromModel(model);
     }
 
-    std::vector<plabundle::FrameCamera> makeCameras(int count)
+    std::vector<placamera::FramePinholeNumericState> makeCameras(int count)
     {
-        std::vector<plabundle::FrameCamera> cameras;
+        std::vector<placamera::FramePinholeNumericState> cameras;
         cameras.reserve(static_cast<std::size_t>(count));
         for (int index = 0; index < count; ++index)
         {
             const double position = (static_cast<double>(index) / std::max(1, count - 1) - 0.5) * 18.0;
-            cameras.push_back(makeCamera(position, std::sin(index * 0.45) * 3.0, 0.0));
+            cameras.push_back(makeCamera(position, std::sin(index * 0.45) * 3.0, 0.0, index));
         }
         return cameras;
     }
 
     std::vector<plabundle::Track>
-    makeTracks(const std::vector<plabundle::FrameCamera>& cameras, int trackCount, int viewsPerTrack)
+    makeTracks(const std::vector<placamera::FramePinholeNumericState>& cameras, int trackCount, int viewsPerTrack)
     {
         std::mt19937 generator(7U);
         std::uniform_real_distribution<double> xy_distribution(-4.0, 4.0);
@@ -76,12 +91,13 @@ namespace
             for (int view_index = 0; view_index < viewsPerTrack; ++view_index)
             {
                 const int camera_index = (first_camera + view_index) % static_cast<int>(cameras.size());
-                plabundle::Projection projection;
-                if (plabundle::projectWorldPoint(cameras[static_cast<std::size_t>(camera_index)], truth, &projection))
+                const placamera::GroundCoordinate ground{cameras[static_cast<std::size_t>(camera_index)].groundFrame(), truth};
+                const auto projection = cameras[static_cast<std::size_t>(camera_index)].groundToImage(ground);
+                if (projection)
                 {
                     track.observations.push_back({camera_index,
-                                                  projection.pixel[0] + image_noise(generator),
-                                                  projection.pixel[1] + image_noise(generator),
+                                                  projection.value().image.sample + image_noise(generator),
+                                                  projection.value().image.line + image_noise(generator),
                                                   1.0,
                                                   1.0});
                 }
@@ -96,7 +112,7 @@ namespace
 
     plabundle::Problem makeProblem(const BenchmarkSettings& settings)
     {
-        const std::vector<plabundle::FrameCamera> truth_cameras = makeCameras(settings.cameraCount);
+        const std::vector<placamera::FramePinholeNumericState> truth_cameras = makeCameras(settings.cameraCount);
         plabundle::Problem problem;
         problem.cameras = truth_cameras;
         problem.tracks = makeTracks(truth_cameras, settings.trackCount, settings.viewsPerTrack);
@@ -104,16 +120,12 @@ namespace
         {
             const double sign = index % 2 == 0 ? 1.0 : -1.0;
             const double scale = 1.0 + static_cast<double>(index % 5) * 0.1;
-            if (!plabundle::applyPoseDelta(&problem.cameras[index],
-                                           {0.0007 * sign * scale,
-                                            -0.0005 * sign,
-                                            0.0004 * scale,
-                                            0.025 * sign * scale,
-                                            -0.018 * sign,
-                                            0.012 * scale}))
-            {
-                throw std::runtime_error("failed to perturb a benchmark camera pose");
-            }
+            problem.cameras[index].applyPoseDelta({0.0007 * sign * scale,
+                                                   -0.0005 * sign,
+                                                   0.0004 * scale,
+                                                   0.025 * sign * scale,
+                                                   -0.018 * sign,
+                                                   0.012 * scale});
         }
         problem.fixedCameraIndices = {0, 1};
         problem.gauge.policy = plabundle::GaugePolicy::RequireExplicitGauge;

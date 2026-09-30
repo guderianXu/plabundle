@@ -1,8 +1,9 @@
 #pragma once
 
-#include <plabundle/camera.h>
 #include <plabundle/constraints.h>
-#include <plabundle/rig.h>
+
+#include <placamera/frame_numeric_state.h>
+#include <placamera/camera_topology.h>
 
 #include <optional>
 #include <string>
@@ -35,7 +36,7 @@ namespace plabundle
 
     struct Problem
     {
-        std::vector<FrameCamera> cameras;
+        std::vector<placamera::FramePinholeNumericState> cameras;
         std::vector<Track> tracks;
         std::vector<int> fixedCameraIndices;
         std::vector<int> fixedTrackIndices;
@@ -43,12 +44,12 @@ namespace plabundle
         // Unique ids give each camera an independent block; disabling all
         // intrinsic parameters keeps calibration fixed.
         std::vector<int> cameraCalibrationGroupIds;
-        std::vector<FrameCamera> sharedIntrinsicReferenceCameras;
+        std::vector<placamera::FramePinholeNumericState> sharedIntrinsicReferenceCameras;
         std::vector<LaserRangeConstraint> laserRangeConstraints;
         std::vector<ScaleBarConstraint> scaleBarConstraints;
         std::vector<std::optional<CameraPosePrior>> cameraPosePriors;
         std::optional<CameraPlaneConstraint> cameraPlaneConstraint;
-        RigTopology rig;
+        placamera::RigTopology rig;
         Gauge gauge;
     };
 

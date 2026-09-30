@@ -23,26 +23,10 @@ namespace plabundle::internal::plamatrix_ba
             return scaled_length / std::atan(scaled_length);
         }
 
-        bool pixelByCameraPointJacobian(const CameraState& camera, const double camera_point[3], double jacobian[6])
-        {
-            if (!camera_point || !jacobian)
-            {
-                return false;
-            }
-            ProjectionLinearization linearization;
-            if (!linearizeCameraPoint(
-                    camera.frameCamera(), {camera_point[0], camera_point[1], camera_point[2]}, &linearization))
-            {
-                return false;
-            }
-            std::copy(linearization.cameraPointJacobian.begin(), linearization.cameraPointJacobian.end(), jacobian);
-            return true;
-        }
-
-        CameraState cameraWithSharedIntrinsics(const CameraState& camera,
-                                               const CameraState& reference_camera,
-                                               const std::array<double, kBAIntrinsicParameterCount>& parameters,
-                                               const BAIntrinsicParameterMask& active)
+        CameraState makeCameraWithSharedIntrinsics(const CameraState& camera,
+                                                   const CameraState& reference_camera,
+                                                   const std::array<double, kBAIntrinsicParameterCount>& parameters,
+                                                   const BAIntrinsicParameterMask& active)
         {
             const auto enabled = [&](BAIntrinsicParameter parameter)
             { return active[static_cast<std::size_t>(parameter)]; };
@@ -80,6 +64,14 @@ namespace plabundle::internal::plamatrix_ba
 
     } // namespace
 
+    CameraState cameraWithSharedIntrinsics(const CameraState& camera,
+                                           const CameraState& reference_camera,
+                                           const std::array<double, kBAIntrinsicParameterCount>& shared_intrinsics,
+                                           const BAIntrinsicParameterMask& active_parameters)
+    {
+        return makeCameraWithSharedIntrinsics(camera, reference_camera, shared_intrinsics, active_parameters);
+    }
+
     ImageRobustLossEvaluation
     evaluateImageRobustLoss(double squared_residual_norm, ImageRobustLoss loss, double scale_pixels)
     {
@@ -116,16 +108,15 @@ namespace plabundle::internal::plamatrix_ba
         throw std::invalid_argument("image robust loss value is invalid");
     }
 
-    bool linearizeObservation(const CameraState& camera,
-                              const std::array<double, 3>& point,
-                              const BAObservation& observation,
-                              ImageRobustLoss robust_loss,
-                              double robust_loss_scale_pixels,
-                              ObservationLinearization* linearization,
-                              bool whiten_by_measurement_scale,
-                              bool use_reference_point_parameterization)
+    bool evaluateObservationCost(const CameraState& camera,
+                                 const std::array<double, 3>& point,
+                                 const BAObservation& observation,
+                                 ImageRobustLoss robust_loss,
+                                 double robust_loss_scale_pixels,
+                                 double* cost,
+                                 bool whiten_by_measurement_scale)
     {
-        if (!linearization || !observationDataIsUsable(observation))
+        if (!cost || !observationDataIsUsable(observation))
         {
             return false;
         }
@@ -136,23 +127,78 @@ namespace plabundle::internal::plamatrix_ba
         {
             return false;
         }
-        double camera_point[3] = {0.0, 0.0, 0.0};
-        camera.worldToCameraAtLine(world, observation.v, camera_point);
-        double pixel_by_camera[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        if (!pixelByCameraPointJacobian(camera, camera_point, pixel_by_camera))
+        const double residual_x = pixel[0] - observation.u;
+        const double residual_y = pixel[1] - observation.v;
+        double observation_weight = sanitizedObservationWeight(observation);
+        if (whiten_by_measurement_scale)
+        {
+            const double measurement_scale = sanitizedMeasurementScale(observation);
+            observation_weight /= measurement_scale * measurement_scale;
+        }
+        try
+        {
+            *cost = evaluateImageRobustLoss(observation_weight * (residual_x * residual_x + residual_y * residual_y),
+                                            robust_loss,
+                                            robust_loss_scale_pixels)
+                        .cost;
+        }
+        catch (const std::invalid_argument&)
         {
             return false;
         }
-        FrameCamera effective_frame;
-        if (!cameraAtLine(camera.frameCamera(), observation.v, &effective_frame))
+        return std::isfinite(*cost);
+    }
+
+    bool
+    evaluateObservationCostWithSharedIntrinsics(const CameraState& camera,
+                                                const CameraState& reference_camera,
+                                                const std::array<double, kBAIntrinsicParameterCount>& shared_intrinsics,
+                                                const BAIntrinsicParameterMask& active_parameters,
+                                                const std::array<double, 3>& point,
+                                                const BAObservation& observation,
+                                                ImageRobustLoss robust_loss,
+                                                double robust_loss_scale_pixels,
+                                                double* cost,
+                                                bool whiten_by_measurement_scale)
+    {
+        if (!cost || !std::all_of(shared_intrinsics.begin(),
+                                  shared_intrinsics.end(),
+                                  [](double value) { return std::isfinite(value); }))
         {
             return false;
         }
-        const CameraState effective_pose(std::move(effective_frame));
+        const CameraState effective =
+            makeCameraWithSharedIntrinsics(camera, reference_camera, shared_intrinsics, active_parameters);
+        return evaluateObservationCost(
+            effective, point, observation, robust_loss, robust_loss_scale_pixels, cost, whiten_by_measurement_scale);
+    }
+
+    bool linearizeObservation(const CameraState& camera,
+                              const std::array<double, 3>& point,
+                              const BAObservation& observation,
+                              ImageRobustLoss robust_loss,
+                              double robust_loss_scale_pixels,
+                              ObservationLinearization* linearization,
+                              bool whiten_by_measurement_scale,
+                              bool use_reference_point_parameterization,
+                              ProjectionLinearization* model_linearization)
+    {
+        if (!linearization || !observationDataIsUsable(observation))
+        {
+            return false;
+        }
+        ProjectionLinearization local_model_linearization;
+        ProjectionLinearization* projection =
+            model_linearization ? model_linearization : &local_model_linearization;
+        if (!camera.linearize(point, observation.v, model_linearization != nullptr, projection))
+        {
+            return false;
+        }
 
         *linearization = ObservationLinearization{};
-        linearization->residual = {{pixel[0] - observation.u, pixel[1] - observation.v}};
-        const auto rotation = effective_pose.cameraToWorldRotation();
+        linearization->residual = {{projection->projection.pixel[0] - observation.u,
+                                    projection->projection.pixel[1] - observation.v}};
+        const auto rotation = camera.cameraToWorldRotation();
         for (int pixel_axis = 0; pixel_axis < 2; ++pixel_axis)
         {
             for (int world_axis = 0; world_axis < 3; ++world_axis)
@@ -160,63 +206,49 @@ namespace plabundle::internal::plamatrix_ba
                 double derivative = 0.0;
                 for (int camera_axis = 0; camera_axis < 3; ++camera_axis)
                 {
-                    derivative +=
-                        pixel_by_camera[pixel_axis * 3 + camera_axis] * rotation[world_axis * 3 + camera_axis];
+                    derivative += projection->cameraPointJacobian[pixel_axis * 3 + camera_axis] *
+                                  rotation[world_axis * 3 + camera_axis];
                 }
                 linearization->pointJacobian[pixel_axis * 3 + world_axis] = derivative;
                 linearization->cameraJacobian[pixel_axis * 6 + 3 + world_axis] = -derivative;
             }
 
             const double* point_jacobian = linearization->pointJacobian.data() + pixel_axis * 3;
-            const double dx = point[0] - effective_pose.cameraCenter()[0];
-            const double dy = point[1] - effective_pose.cameraCenter()[1];
-            const double dz = point[2] - effective_pose.cameraCenter()[2];
+            const double dx = point[0] - camera.cameraCenter()[0];
+            const double dy = point[1] - camera.cameraCenter()[1];
+            const double dz = point[2] - camera.cameraCenter()[2];
             linearization->cameraJacobian[pixel_axis * 6 + 0] = point_jacobian[1] * dz - point_jacobian[2] * dy;
             linearization->cameraJacobian[pixel_axis * 6 + 1] = -point_jacobian[0] * dz + point_jacobian[2] * dx;
             linearization->cameraJacobian[pixel_axis * 6 + 2] = point_jacobian[0] * dy - point_jacobian[1] * dx;
 
             if (use_reference_point_parameterization)
             {
-                // 参考 type-4 姿态在转换到 CV camera-to-world 约定后等价于
-                // R * D * Rx(x) * Ry(y) * Rz(z) * D，D=diag(1,-1,-1)。
-                // 因此 y/z 局部轴相对普通右扰动反号。
-                const double* camera_jacobian = pixel_by_camera + pixel_axis * 3;
-                linearization->cameraJacobian[pixel_axis * 6 + 0] =
-                    camera_jacobian[1] * camera_point[2] - camera_jacobian[2] * camera_point[1];
-                linearization->cameraJacobian[pixel_axis * 6 + 1] =
-                    camera_jacobian[0] * camera_point[2] - camera_jacobian[2] * camera_point[0];
-                linearization->cameraJacobian[pixel_axis * 6 + 2] =
-                    -camera_jacobian[0] * camera_point[1] + camera_jacobian[1] * camera_point[0];
-            }
-        }
-
-        if (camera.projectionModel() == FrameProjectionModel::RollingShutter && !use_reference_point_parameterization)
-        {
-            const auto base_rotation = camera.cameraToWorldRotation();
-            const auto effective_rotation = effective_pose.cameraToWorldRotation();
-            std::array<double, 9> rolling_rotation{};
-            for (int row = 0; row < 3; ++row)
-            {
-                for (int column = 0; column < 3; ++column)
+                const double* camera_jacobian = projection->cameraPointJacobian.data() + pixel_axis * 3;
+                const auto center = camera.cameraCenter();
+                const std::array<double, 3> target_difference{
+                    {point[0] - center[0], -(point[1] - center[1]), -(point[2] - center[2])}};
+                const std::array<std::array<double, 3>, 3> target_cross{
+                    {{{0.0, -target_difference[2], target_difference[1]}},
+                     {{target_difference[2], 0.0, -target_difference[0]}},
+                     {{-target_difference[1], target_difference[0], 0.0}}}};
+                constexpr std::array<double, 3> signs{{1.0, -1.0, -1.0}};
+                for (int parameter = 0; parameter < 3; ++parameter)
                 {
-                    for (int inner = 0; inner < 3; ++inner)
+                    double derivative = 0.0;
+                    for (int camera_axis = 0; camera_axis < 3; ++camera_axis)
                     {
-                        rolling_rotation[row * 3 + column] +=
-                            effective_rotation[row * 3 + inner] * base_rotation[column * 3 + inner];
+                        double local_update = 0.0;
+                        for (int target_axis = 0; target_axis < 3; ++target_axis)
+                        {
+                            // target_rotation = worldToCamera * D = C2W^T * D.
+                            local_update += rotation[static_cast<std::size_t>(target_axis * 3 + camera_axis)] *
+                                            signs[static_cast<std::size_t>(target_axis)] *
+                                            target_cross[static_cast<std::size_t>(parameter)]
+                                                        [static_cast<std::size_t>(target_axis)];
+                        }
+                        derivative += camera_jacobian[camera_axis] * local_update;
                     }
-                }
-            }
-            for (int pixel_axis = 0; pixel_axis < 2; ++pixel_axis)
-            {
-                const std::array<double, 3> effective_derivative{{linearization->cameraJacobian[pixel_axis * 6],
-                                                                  linearization->cameraJacobian[pixel_axis * 6 + 1],
-                                                                  linearization->cameraJacobian[pixel_axis * 6 + 2]}};
-                for (int base_axis = 0; base_axis < 3; ++base_axis)
-                {
-                    linearization->cameraJacobian[pixel_axis * 6 + base_axis] =
-                        effective_derivative[0] * rolling_rotation[base_axis] +
-                        effective_derivative[1] * rolling_rotation[3 + base_axis] +
-                        effective_derivative[2] * rolling_rotation[6 + base_axis];
+                    linearization->cameraJacobian[pixel_axis * 6 + parameter] = derivative;
                 }
             }
         }
@@ -272,25 +304,38 @@ namespace plabundle::internal::plamatrix_ba
             return false;
         }
         const CameraState effective =
-            cameraWithSharedIntrinsics(camera, reference_camera, shared_intrinsics, active_parameters);
-        if (!linearizeObservation(effective,
-                                  point,
-                                  observation,
-                                  robust_loss,
-                                  robust_loss_scale_pixels,
-                                  linearization,
-                                  whiten_by_measurement_scale,
-                                  use_reference_point_parameterization))
-        {
-            return false;
-        }
+            makeCameraWithSharedIntrinsics(camera, reference_camera, shared_intrinsics, active_parameters);
+        return linearizeObservationWithActiveIntrinsics(effective,
+                                                        active_parameters,
+                                                        point,
+                                                        observation,
+                                                        robust_loss,
+                                                        robust_loss_scale_pixels,
+                                                        linearization,
+                                                        whiten_by_measurement_scale,
+                                                        use_reference_point_parameterization);
+    }
 
-        const double world[3] = {point[0], point[1], point[2]};
-        double camera_point[3] = {0.0, 0.0, 0.0};
-        effective.worldToCameraAtLine(world, observation.v, camera_point);
+    bool linearizeObservationWithActiveIntrinsics(const CameraState& effective,
+                                                  const BAIntrinsicParameterMask& active_parameters,
+                                                  const std::array<double, 3>& point,
+                                                  const BAObservation& observation,
+                                                  ImageRobustLoss robust_loss,
+                                                  double robust_loss_scale_pixels,
+                                                  ObservationLinearization* linearization,
+                                                  bool whiten_by_measurement_scale,
+                                                  bool use_reference_point_parameterization)
+    {
         ProjectionLinearization model_linearization;
-        if (!linearizeCameraPoint(
-                effective.frameCamera(), {camera_point[0], camera_point[1], camera_point[2]}, &model_linearization))
+        if (!linearization || !linearizeObservation(effective,
+                                                    point,
+                                                    observation,
+                                                    robust_loss,
+                                                    robust_loss_scale_pixels,
+                                                    linearization,
+                                                    whiten_by_measurement_scale,
+                                                    use_reference_point_parameterization,
+                                                    &model_linearization))
         {
             return false;
         }

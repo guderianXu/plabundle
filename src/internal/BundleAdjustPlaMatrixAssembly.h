@@ -11,6 +11,10 @@
 namespace plabundle::internal::plamatrix_ba
 {
 
+    using placamera::RigCapture;
+    using placamera::RigSensor;
+    using placamera::RigTopology;
+
     class InvalidProjectionError : public std::runtime_error
     {
     public:
@@ -26,6 +30,12 @@ namespace plabundle::internal::plamatrix_ba
         std::vector<IntrinsicGroupState> intrinsicGroups;
     };
 
+    struct EffectiveCameraCache
+    {
+        std::vector<CameraState> cameras;
+        std::vector<BAIntrinsicParameterMask> activeParameters;
+    };
+
     struct NormalEquationAssemblyWorkspace
     {
         explicit NormalEquationAssemblyWorkspace(const ActiveProblem& active);
@@ -35,6 +45,7 @@ namespace plabundle::internal::plamatrix_ba
         std::vector<double> partialCosts;
         std::vector<std::exception_ptr> errors;
         std::vector<std::size_t> trackBoundaries;
+        EffectiveCameraCache effectiveCameraCache;
         int partitionThreadCount = 0;
     };
 

@@ -196,10 +196,16 @@ namespace plabundle
         }
         for (const auto& [id, state] : cameras)
         {
-            std::string camera_error;
-            if (!validateFrameCamera(state->camera, &camera_error))
+            const auto& camera = state->camera;
+            const auto& pose = camera.pose();
+            const auto& intrinsics = camera.intrinsics();
+            const bool valid = camera.imageSize().isValid() && std::isfinite(intrinsics.focalX) &&
+                               std::isfinite(intrinsics.focalY) && intrinsics.focalX != 0.0 && intrinsics.focalY != 0.0 &&
+                               std::all_of(pose.center.begin(), pose.center.end(), [](double value)
+                                           { return std::isfinite(value); });
+            if (!valid)
             {
-                setError(error, "photo-alignment camera " + id + " is invalid: " + camera_error);
+                setError(error, "photo-alignment camera " + id + " is invalid");
                 return false;
             }
         }
@@ -263,9 +269,10 @@ namespace plabundle
             PhotoAlignmentCameraDifference difference;
             difference.id = id;
             difference.centerDistanceMeters =
-                distance(reference_state->camera.cameraCenter, candidate_state.camera.cameraCenter);
-            difference.rotationAngleDegrees = rotationDifferenceDegrees(reference_state->camera.cameraToWorldRotation,
-                                                                        candidate_state.camera.cameraToWorldRotation);
+                distance(reference_state->camera.pose().center, candidate_state.camera.pose().center);
+            difference.rotationAngleDegrees = rotationDifferenceDegrees(
+                reference_state->camera.pose().cameraToWorldRotation,
+                candidate_state.camera.pose().cameraToWorldRotation);
             comparison->maximumCameraCenterDifferenceMeters =
                 std::max(comparison->maximumCameraCenterDifferenceMeters, difference.centerDistanceMeters);
             comparison->maximumCameraRotationDifferenceDegrees =
