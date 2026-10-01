@@ -1,4 +1,6 @@
 #include <plabundle/constraints.h>
+#include <plamatrix/dense/matrix.h>
+#include <plamatrix/internal/core/execution_policy.h>
 
 #include "control_point_internal.h"
 
@@ -9,6 +11,19 @@ namespace plabundle
 {
     namespace
     {
+        plamatrix::Matrix3d toMatrix(const std::array<double, 9>& values)
+        {
+            plamatrix::Matrix3d matrix;
+            for (int row = 0; row < 3; ++row)
+            {
+                for (int column = 0; column < 3; ++column)
+                {
+                    matrix(row, column) = values[static_cast<std::size_t>(row * 3 + column)];
+                }
+            }
+            return matrix;
+        }
+
         void setError(std::string* error, const std::string& message)
         {
             if (error)
@@ -42,30 +57,28 @@ namespace plabundle
             }
 
             const double threshold = std::max(1.0, maximum) * 1.0e-12;
+            const plamatrix::internal::ScopedExecutionPolicy cpu_only(plamatrix::internal::ExecutionPolicy::CpuOnly);
+            const auto factor = toMatrix(matrix).llt();
+            if (factor.info() != plamatrix::Success)
+            {
+                setError(error, "control-point covariance/information must be positive definite");
+                return false;
+            }
+            const auto factor_lower = factor.matrixL();
+            for (int diagonal = 0; diagonal < 3; ++diagonal)
+            {
+                const double pivot = factor_lower(diagonal, diagonal) * factor_lower(diagonal, diagonal);
+                if (!(pivot > threshold) || !std::isfinite(pivot))
+                {
+                    setError(error, "control-point covariance/information must be positive definite");
+                    return false;
+                }
+            }
             for (int row = 0; row < 3; ++row)
             {
                 for (int column = 0; column <= row; ++column)
                 {
-                    double value = matrix[static_cast<std::size_t>(row * 3 + column)];
-                    for (int inner = 0; inner < column; ++inner)
-                    {
-                        value -= (*lower)[static_cast<std::size_t>(row * 3 + inner)] *
-                                 (*lower)[static_cast<std::size_t>(column * 3 + inner)];
-                    }
-                    if (row == column)
-                    {
-                        if (!(value > threshold) || !std::isfinite(value))
-                        {
-                            setError(error, "control-point covariance/information must be positive definite");
-                            return false;
-                        }
-                        (*lower)[static_cast<std::size_t>(row * 3 + column)] = std::sqrt(value);
-                    }
-                    else
-                    {
-                        (*lower)[static_cast<std::size_t>(row * 3 + column)] =
-                            value / (*lower)[static_cast<std::size_t>(column * 3 + column)];
-                    }
+                    (*lower)[static_cast<std::size_t>(row * 3 + column)] = factor_lower(row, column);
                 }
             }
             return true;
@@ -105,18 +118,14 @@ namespace plabundle
                 {
                     return false;
                 }
+                const plamatrix::internal::ScopedExecutionPolicy cpu_only(
+                    plamatrix::internal::ExecutionPolicy::CpuOnly);
+                const auto inverse = toMatrix(lower).fullPivLu().solve(plamatrix::Matrix3d::Identity());
                 for (int column = 0; column < 3; ++column)
                 {
                     for (int row = 0; row < 3; ++row)
                     {
-                        double value = row == column ? 1.0 : 0.0;
-                        for (int inner = 0; inner < row; ++inner)
-                        {
-                            value -= lower[static_cast<std::size_t>(row * 3 + inner)] *
-                                     whitening->matrix[static_cast<std::size_t>(inner * 3 + column)];
-                        }
-                        whitening->matrix[static_cast<std::size_t>(row * 3 + column)] =
-                            value / lower[static_cast<std::size_t>(row * 3 + row)];
+                        whitening->matrix[static_cast<std::size_t>(row * 3 + column)] = inverse(row, column);
                     }
                 }
                 return true;
@@ -130,17 +139,16 @@ namespace plabundle
                     setError(error, "control-point square-root information contains a non-finite value");
                     return false;
                 }
+                const plamatrix::internal::ScopedExecutionPolicy cpu_only(
+                    plamatrix::internal::ExecutionPolicy::CpuOnly);
+                const auto weight = toMatrix(constraint.uncertaintyMatrix);
+                const auto information_matrix = (weight.transpose() * weight).eval();
                 std::array<double, 9> information{};
                 for (int row = 0; row < 3; ++row)
                 {
                     for (int column = 0; column < 3; ++column)
                     {
-                        for (int inner = 0; inner < 3; ++inner)
-                        {
-                            information[static_cast<std::size_t>(row * 3 + column)] +=
-                                constraint.uncertaintyMatrix[static_cast<std::size_t>(inner * 3 + row)] *
-                                constraint.uncertaintyMatrix[static_cast<std::size_t>(inner * 3 + column)];
-                        }
+                        information[static_cast<std::size_t>(row * 3 + column)] = information_matrix(row, column);
                     }
                 }
                 std::array<double, 9> unused{};
@@ -171,30 +179,23 @@ namespace plabundle
                 return false;
             }
             const auto& matrix = whitening.matrix;
-            const double determinant = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
-                                       matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6]) +
-                                       matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
+            const plamatrix::internal::ScopedExecutionPolicy cpu_only(plamatrix::internal::ExecutionPolicy::CpuOnly);
+            const auto factor = toMatrix(matrix).fullPivLu();
+            const double determinant = factor.determinant();
             if (!std::isfinite(determinant) || std::abs(determinant) <= 1.0e-18)
             {
                 setError(error, "control-point whitening matrix is singular");
                 return false;
             }
-            const double inverse_scale = 1.0 / determinant;
-            const std::array<double, 9> inverse{{
-                (matrix[4] * matrix[8] - matrix[5] * matrix[7]) * inverse_scale,
-                (matrix[2] * matrix[7] - matrix[1] * matrix[8]) * inverse_scale,
-                (matrix[1] * matrix[5] - matrix[2] * matrix[4]) * inverse_scale,
-                (matrix[5] * matrix[6] - matrix[3] * matrix[8]) * inverse_scale,
-                (matrix[0] * matrix[8] - matrix[2] * matrix[6]) * inverse_scale,
-                (matrix[2] * matrix[3] - matrix[0] * matrix[5]) * inverse_scale,
-                (matrix[3] * matrix[7] - matrix[4] * matrix[6]) * inverse_scale,
-                (matrix[1] * matrix[6] - matrix[0] * matrix[7]) * inverse_scale,
-                (matrix[0] * matrix[4] - matrix[1] * matrix[3]) * inverse_scale,
-            }};
+            const auto inverse = factor.solve(plamatrix::Matrix3d::Identity());
             double squared_uncertainty = 0.0;
-            for (const double value : inverse)
+            for (int row = 0; row < 3; ++row)
             {
-                squared_uncertainty += value * value;
+                for (int column = 0; column < 3; ++column)
+                {
+                    const double value = inverse(row, column);
+                    squared_uncertainty += value * value;
+                }
             }
             *rms_uncertainty = std::sqrt(squared_uncertainty);
             return std::isfinite(*rms_uncertainty) && *rms_uncertainty > 0.0;

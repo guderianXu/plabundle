@@ -1,4 +1,6 @@
 #include <plabundle/constraints.h>
+#include <plamatrix/dense/matrix.h>
+#include <plamatrix/internal/core/execution_policy.h>
 
 #include "pose_prior_internal.h"
 
@@ -9,6 +11,33 @@ namespace plabundle
 {
     namespace
     {
+        template <int Dimension> using FixedMatrix = plamatrix::Matrix<double, Dimension, Dimension>;
+
+        template <int Dimension> FixedMatrix<Dimension> toMatrix(const std::array<double, 36>& values)
+        {
+            FixedMatrix<Dimension> matrix;
+            for (int row = 0; row < Dimension; ++row)
+            {
+                for (int column = 0; column < Dimension; ++column)
+                {
+                    matrix(row, column) = values[static_cast<std::size_t>(row * 6 + column)];
+                }
+            }
+            return matrix;
+        }
+
+        template <int Dimension> void copyToArray(const FixedMatrix<Dimension>& matrix, std::array<double, 36>* values)
+        {
+            values->fill(0.0);
+            for (int row = 0; row < Dimension; ++row)
+            {
+                for (int column = 0; column < Dimension; ++column)
+                {
+                    (*values)[static_cast<std::size_t>(row * 6 + column)] = matrix(row, column);
+                }
+            }
+        }
+
         void setError(std::string* error, const std::string& message)
         {
             if (error)
@@ -27,14 +56,14 @@ namespace plabundle
                                [](double value) { return std::isfinite(value); });
         }
 
-        bool
-        cholesky(const std::array<double, 36>& matrix, int dimension, std::array<double, 36>* lower, std::string* error)
+        template <int Dimension>
+        bool choleskyFixed(const std::array<double, 36>& matrix, std::array<double, 36>* lower, std::string* error)
         {
             lower->fill(0.0);
             double maximum = 0.0;
-            for (int row = 0; row < dimension; ++row)
+            for (int row = 0; row < Dimension; ++row)
             {
-                for (int column = 0; column < dimension; ++column)
+                for (int column = 0; column < Dimension; ++column)
                 {
                     const double value = matrix[static_cast<std::size_t>(row * 6 + column)];
                     const double transpose = matrix[static_cast<std::size_t>(column * 6 + row)];
@@ -52,33 +81,50 @@ namespace plabundle
                 }
             }
             const double threshold = std::max(1.0, maximum) * 1.0e-12;
-            for (int row = 0; row < dimension; ++row)
+            const plamatrix::internal::ScopedExecutionPolicy cpu_only(plamatrix::internal::ExecutionPolicy::CpuOnly);
+            const auto factor = toMatrix<Dimension>(matrix).llt();
+            if (factor.info() != plamatrix::Success)
             {
-                for (int column = 0; column <= row; ++column)
+                setError(error, "pose-prior covariance/information must be positive definite");
+                return false;
+            }
+            const auto factor_lower = factor.matrixL();
+            for (int diagonal = 0; diagonal < Dimension; ++diagonal)
+            {
+                const double pivot = factor_lower(diagonal, diagonal) * factor_lower(diagonal, diagonal);
+                if (!(pivot > threshold) || !std::isfinite(pivot))
                 {
-                    double value = matrix[static_cast<std::size_t>(row * 6 + column)];
-                    for (int inner = 0; inner < column; ++inner)
-                    {
-                        value -= (*lower)[static_cast<std::size_t>(row * 6 + inner)] *
-                                 (*lower)[static_cast<std::size_t>(column * 6 + inner)];
-                    }
-                    if (row == column)
-                    {
-                        if (!(value > threshold) || !std::isfinite(value))
-                        {
-                            setError(error, "pose-prior covariance/information must be positive definite");
-                            return false;
-                        }
-                        (*lower)[static_cast<std::size_t>(row * 6 + column)] = std::sqrt(value);
-                    }
-                    else
-                    {
-                        (*lower)[static_cast<std::size_t>(row * 6 + column)] =
-                            value / (*lower)[static_cast<std::size_t>(column * 6 + column)];
-                    }
+                    setError(error, "pose-prior covariance/information must be positive definite");
+                    return false;
                 }
             }
+            copyToArray(factor_lower, lower);
             return true;
+        }
+
+        bool
+        cholesky(const std::array<double, 36>& matrix, int dimension, std::array<double, 36>* lower, std::string* error)
+        {
+            return dimension == 3 ? choleskyFixed<3>(matrix, lower, error) : choleskyFixed<6>(matrix, lower, error);
+        }
+
+        template <int Dimension> std::array<double, 36> inverseLower(const std::array<double, 36>& lower)
+        {
+            const plamatrix::internal::ScopedExecutionPolicy cpu_only(plamatrix::internal::ExecutionPolicy::CpuOnly);
+            const auto inverse = toMatrix<Dimension>(lower).fullPivLu().solve(FixedMatrix<Dimension>::Identity());
+            std::array<double, 36> result{};
+            copyToArray(inverse, &result);
+            return result;
+        }
+
+        template <int Dimension> std::array<double, 36> gramMatrix(const std::array<double, 36>& values)
+        {
+            const plamatrix::internal::ScopedExecutionPolicy cpu_only(plamatrix::internal::ExecutionPolicy::CpuOnly);
+            const auto matrix = toMatrix<Dimension>(values);
+            const auto gram = (matrix.transpose() * matrix).eval();
+            std::array<double, 36> result{};
+            copyToArray(gram, &result);
+            return result;
         }
 
         std::array<double, 36> selectedMatrix(const CameraPosePrior& prior,
@@ -172,21 +218,8 @@ namespace plabundle
                 {
                     return false;
                 }
-                std::array<double, 36> inverse_lower{};
-                for (int column = 0; column < dimension; ++column)
-                {
-                    for (int row = 0; row < dimension; ++row)
-                    {
-                        double value = row == column ? 1.0 : 0.0;
-                        for (int inner = 0; inner < row; ++inner)
-                        {
-                            value -= lower[static_cast<std::size_t>(row * 6 + inner)] *
-                                     inverse_lower[static_cast<std::size_t>(inner * 6 + column)];
-                        }
-                        inverse_lower[static_cast<std::size_t>(row * 6 + column)] =
-                            value / lower[static_cast<std::size_t>(row * 6 + row)];
-                    }
-                }
+                const std::array<double, 36> inverse_lower =
+                    dimension == 3 ? inverseLower<3>(lower) : inverseLower<6>(lower);
                 for (int row = 0; row < dimension; ++row)
                 {
                     for (int column = 0; column < dimension; ++column)
@@ -199,19 +232,8 @@ namespace plabundle
                 return true;
             }
 
-            std::array<double, 36> information{};
-            for (int row = 0; row < dimension; ++row)
-            {
-                for (int column = 0; column < dimension; ++column)
-                {
-                    for (int inner = 0; inner < dimension; ++inner)
-                    {
-                        information[static_cast<std::size_t>(row * 6 + column)] +=
-                            selected[static_cast<std::size_t>(inner * 6 + row)] *
-                            selected[static_cast<std::size_t>(inner * 6 + column)];
-                    }
-                }
-            }
+            const std::array<double, 36> information =
+                dimension == 3 ? gramMatrix<3>(selected) : gramMatrix<6>(selected);
             std::array<double, 36> unused{};
             if (!cholesky(information, dimension, &unused, error))
             {

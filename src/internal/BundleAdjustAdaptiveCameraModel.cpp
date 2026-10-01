@@ -2,6 +2,9 @@
 #include "../control_point_internal.h"
 #include "BundleAdjustValidation.h"
 
+#include <plamatrix/dense/matrix.h>
+#include <plamatrix/internal/core/execution_policy.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -62,22 +65,33 @@ namespace plabundle::internal
                 matrix[static_cast<std::size_t>(axis)][static_cast<std::size_t>(axis)] += regularization;
             }
 
-            const double a = matrix[0][0];
-            const double b = matrix[0][1];
-            const double c = matrix[0][2];
-            const double d = matrix[1][1];
-            const double e = matrix[1][2];
-            const double f = matrix[2][2];
-            const double determinant = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
+            plamatrix::Matrix3d dense;
+            for (int row = 0; row < 3; ++row)
+            {
+                for (int column = 0; column < 3; ++column)
+                {
+                    dense(row, column) = matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)];
+                }
+            }
+            if (!dense.allFinite())
+            {
+                return false;
+            }
+            const plamatrix::internal::ScopedExecutionPolicy cpu_only(plamatrix::internal::ExecutionPolicy::CpuOnly);
+            const auto factor = dense.fullPivLu();
+            const double determinant = factor.determinant();
             if (!std::isfinite(determinant) || determinant <= scale * scale * scale * 1.0e-18)
             {
                 return false;
             }
-            const double reciprocal = 1.0 / determinant;
-            (*inverse)[0] = {
-                {(d * f - e * e) * reciprocal, (c * e - b * f) * reciprocal, (b * e - c * d) * reciprocal}};
-            (*inverse)[1] = {{(*inverse)[0][1], (a * f - c * c) * reciprocal, (b * c - a * e) * reciprocal}};
-            (*inverse)[2] = {{(*inverse)[0][2], (*inverse)[1][2], (a * d - b * b) * reciprocal}};
+            const auto inverted = factor.solve(plamatrix::Matrix3d::Identity());
+            for (int row = 0; row < 3; ++row)
+            {
+                for (int column = 0; column < 3; ++column)
+                {
+                    (*inverse)[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)] = inverted(row, column);
+                }
+            }
             return true;
         }
 
@@ -188,8 +202,8 @@ namespace plabundle::internal
             return std::accumulate(histogram.begin() + firstBin, histogram.end(), 0);
         }
 
-        bool solveSmallLinearSystem(InformationMatrix matrix,
-                                    std::array<double, kBAIntrinsicParameterCount> rightHandSide,
+        bool solveSmallLinearSystem(const InformationMatrix& matrix,
+                                    const std::array<double, kBAIntrinsicParameterCount>& rightHandSide,
                                     int size,
                                     std::array<double, kBAIntrinsicParameterCount>* solution)
         {
@@ -198,56 +212,35 @@ namespace plabundle::internal
                 return false;
             }
             solution->fill(0.0);
-            for (int column = 0; column < size; ++column)
+            plamatrix::MatrixXd dense(size, size);
+            plamatrix::VectorXd right_hand_side(size, 1);
+            double maximum = 0.0;
+            for (int row = 0; row < size; ++row)
             {
-                int pivot = column;
-                double pivotMagnitude =
-                    std::abs(matrix[static_cast<std::size_t>(column)][static_cast<std::size_t>(column)]);
-                for (int row = column + 1; row < size; ++row)
+                right_hand_side(row) = rightHandSide[static_cast<std::size_t>(row)];
+                for (int column = 0; column < size; ++column)
                 {
-                    const double magnitude =
-                        std::abs(matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)]);
-                    if (magnitude > pivotMagnitude)
-                    {
-                        pivot = row;
-                        pivotMagnitude = magnitude;
-                    }
-                }
-                if (!std::isfinite(pivotMagnitude) || pivotMagnitude <= 1.0e-12)
-                {
-                    return false;
-                }
-                if (pivot != column)
-                {
-                    std::swap(matrix[static_cast<std::size_t>(pivot)], matrix[static_cast<std::size_t>(column)]);
-                    std::swap(rightHandSide[static_cast<std::size_t>(pivot)],
-                              rightHandSide[static_cast<std::size_t>(column)]);
-                }
-                const double diagonal = matrix[static_cast<std::size_t>(column)][static_cast<std::size_t>(column)];
-                for (int entry = column; entry < size; ++entry)
-                {
-                    matrix[static_cast<std::size_t>(column)][static_cast<std::size_t>(entry)] /= diagonal;
-                }
-                rightHandSide[static_cast<std::size_t>(column)] /= diagonal;
-                for (int row = 0; row < size; ++row)
-                {
-                    if (row == column)
-                    {
-                        continue;
-                    }
-                    const double factor = matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)];
-                    for (int entry = column; entry < size; ++entry)
-                    {
-                        matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(entry)] -=
-                            factor * matrix[static_cast<std::size_t>(column)][static_cast<std::size_t>(entry)];
-                    }
-                    rightHandSide[static_cast<std::size_t>(row)] -=
-                        factor * rightHandSide[static_cast<std::size_t>(column)];
+                    const double value = matrix[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)];
+                    dense(row, column) = value;
+                    maximum = std::max(maximum, std::abs(value));
                 }
             }
+            if (!dense.allFinite() || !right_hand_side.allFinite() || maximum <= 1.0e-12)
+            {
+                return false;
+            }
+            const plamatrix::internal::ScopedExecutionPolicy cpu_only(plamatrix::internal::ExecutionPolicy::CpuOnly);
+            plamatrix::FullPivLU<plamatrix::MatrixXd> factor;
+            factor.setThreshold(1.0e-12 / maximum);
+            factor.compute(dense);
+            if (!factor.isInvertible())
+            {
+                return false;
+            }
+            const auto solved = factor.solve(right_hand_side);
             for (int index = 0; index < size; ++index)
             {
-                (*solution)[static_cast<std::size_t>(index)] = rightHandSide[static_cast<std::size_t>(index)];
+                (*solution)[static_cast<std::size_t>(index)] = solved(index);
             }
             return true;
         }

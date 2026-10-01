@@ -1,5 +1,7 @@
 #include "BundleAdjustPlaMatrixReferenceSchur.h"
 
+#include <plamatrix/dense/small_inverse.h>
+
 #include "BundleAdjustPlaMatrixAssemblyInternal.h"
 #include "BundleAdjustPlaMatrixConstraints.h"
 #include "BundleAdjustValidation.h"
@@ -62,24 +64,7 @@ namespace plabundle::internal::plamatrix_ba
 
         bool invertPointHessian(const std::array<double, 9>& matrix, std::array<double, 9>* inverse)
         {
-            const double determinant = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
-                                       matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6]) +
-                                       matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
-            if (!std::isfinite(determinant) || std::abs(determinant) < 1.0e-15)
-            {
-                return false;
-            }
-            const double scale = 1.0 / determinant;
-            *inverse = {{(matrix[4] * matrix[8] - matrix[5] * matrix[7]) * scale,
-                         (matrix[2] * matrix[7] - matrix[1] * matrix[8]) * scale,
-                         (matrix[1] * matrix[5] - matrix[2] * matrix[4]) * scale,
-                         (matrix[5] * matrix[6] - matrix[3] * matrix[8]) * scale,
-                         (matrix[0] * matrix[8] - matrix[2] * matrix[6]) * scale,
-                         (matrix[2] * matrix[3] - matrix[0] * matrix[5]) * scale,
-                         (matrix[3] * matrix[7] - matrix[4] * matrix[6]) * scale,
-                         (matrix[1] * matrix[6] - matrix[0] * matrix[7]) * scale,
-                         (matrix[0] * matrix[4] - matrix[1] * matrix[3]) * scale}};
-            return std::all_of(inverse->begin(), inverse->end(), [](double value) { return std::isfinite(value); });
+            return plamatrix::tryInverse3x3RowMajor(matrix, inverse, 1.0e-15);
         }
 
         struct ReducedAccumulator

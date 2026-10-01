@@ -1,6 +1,7 @@
 include(GoogleTest)
 
 add_executable(test_plabundle
+    test_covariance_whitening.cpp
     test_native_problem.cpp
     test_linescan.cpp
     test_options.cpp

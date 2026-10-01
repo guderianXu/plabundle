@@ -14,6 +14,7 @@ option(PLABUNDLE_BUILD_TESTS "Build PlaBundle unit tests" ${PROJECT_IS_TOP_LEVEL
 option(PLABUNDLE_BUILD_BENCHMARKS "Build PlaBundle benchmarks" OFF)
 option(PLABUNDLE_BUILD_EXAMPLES "Build PlaBundle examples" OFF)
 option(PLABUNDLE_ENABLE_OPENMP "Enable OpenMP in PlaBundle internal loops" ON)
+option(PLABUNDLE_INSTALL "Generate PlaBundle install rules" ${PROJECT_IS_TOP_LEVEL})
 set(PLABUNDLE_PLAMATRIX_SOURCE_DIR "" CACHE PATH
     "Optional PlaMatrix source tree used by standalone developer builds")
 set(PLABUNDLE_PLACAMERA_SOURCE_DIR "" CACHE PATH
@@ -127,6 +128,7 @@ if(PLABUNDLE_BUILD_EXAMPLES)
     add_subdirectory(examples/consumer)
 endif()
 
+if(PLABUNDLE_INSTALL)
 install(TARGETS plabundle
     EXPORT plabundleTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -158,3 +160,4 @@ install(FILES
 install(FILES LICENSE README.md CHANGELOG.md
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/plabundle
 )
+endif()

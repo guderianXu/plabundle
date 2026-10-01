@@ -20,24 +20,32 @@ OpenCL reduced-Schur backends with:
 
 ## Build
 
-Against an installed PlaMatrix package:
+Against installed PlaMatrix and PlaCamera packages (PlaCamera also requires
+PlaCoordinate):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DPLABUNDLE_BUILD_TESTS=ON \
-  -DCMAKE_PREFIX_PATH=/path/to/plamatrix/install
+  -DCMAKE_PREFIX_PATH="/path/to/plamatrix/install;/path/to/placamera/install;/path/to/placoordinate/install"
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 cmake --install build --prefix /path/to/plabundle/install
 ```
 
-For a source-tree developer build, point PlaBundle at a PlaMatrix checkout:
+For a source-tree developer build, point PlaBundle at PlaMatrix and PlaCamera
+checkouts. Install PlaCoordinate first, or provide its target from a parent
+project:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DPLABUNDLE_PLAMATRIX_SOURCE_DIR=/path/to/plamatrix \
+  -DPLABUNDLE_PLACAMERA_SOURCE_DIR=/path/to/placamera \
+  -DCMAKE_PREFIX_PATH=/path/to/placoordinate/install \
   -DPLABUNDLE_BUILD_TESTS=ON
 ```
+
+`PLABUNDLE_INSTALL` defaults to ON for standalone builds and OFF when added
+to a parent project. Set it explicitly if the parent also exports PlaCamera.
 
 Set `PLABUNDLE_ENABLE_OPENMP=OFF` to disable PlaBundle's OpenMP loops. PlaMatrix
 keeps its own CPU build requirements. CUDA, Vulkan, and OpenCL are enabled on PlaMatrix,

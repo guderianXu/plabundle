@@ -6,6 +6,8 @@ endif()
 # Adding a new PlaMatrix include requires an explicit boundary review.
 set(_allowed_plamatrix_headers
     dense/matrix.h
+    dense/small_inverse.h
+    internal/core/execution_policy.h
     internal/opencl/runtime.h
     internal/ops/statistics.h
     internal/optimization/block_schur.h
